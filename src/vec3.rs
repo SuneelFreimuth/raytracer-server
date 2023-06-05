@@ -21,6 +21,14 @@ impl Vec3 {
         Self { x: 0., y: 0., z: 0. }
     }
 
+    pub fn abs(&self) -> Self {
+        Self {
+            x: self.x.abs(),
+            y: self.y.abs(),
+            z: self.z.abs(),
+        }
+    }
+
     pub fn mag(&self) -> f64 {
         (self.x*self.x + self.y*self.y + self.z*self.z).sqrt()
     }
@@ -49,6 +57,20 @@ impl Vec3 {
         }
     }
 
+    pub fn equal_within(&self, v: &Vec3, e: f64) -> bool {
+        (self.x - v.x).abs() < e &&
+        (self.y - v.y).abs() < e &&
+        (self.z - v.z).abs() < e
+    }
+
+    pub fn powf(&self, n: f64) -> Self {
+        Self {
+            x: self.x.powf(n),
+            y: self.y.powf(n),
+            z: self.z.powf(n),
+        }
+    }
+
     pub fn flip_across(&self, axis: &Self) -> Self {
         2.0 * self.dot(axis) * axis - *self
     }
@@ -62,11 +84,23 @@ impl Vec3 {
     }
 }
 
-impl ops::Add<Vec3> for Vec3 {
-    type Output = Vec3;
+impl ops::Neg for Vec3 {
+    type Output = Self;
 
-    fn add(self, rhs: Vec3) -> Vec3 {
-        Vec3 {
+    fn neg(self) -> Self::Output {
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
+    }
+}
+
+impl ops::Add<Vec3> for Vec3 {
+    type Output = Self;
+
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
             x: self.x + rhs.x,
             y: self.y + rhs.y,
             z: self.z + rhs.z,
@@ -77,7 +111,7 @@ impl ops::Add<Vec3> for Vec3 {
 impl ops::Add<Vec3> for &Vec3 {
     type Output = Vec3;
 
-    fn add(self, rhs: Vec3) -> Vec3 {
+    fn add(self, rhs: Vec3) -> Self::Output {
         Vec3 {
             x: self.x + rhs.x,
             y: self.y + rhs.y,
@@ -89,7 +123,7 @@ impl ops::Add<Vec3> for &Vec3 {
 impl ops::Sub<Vec3> for Vec3 {
     type Output = Vec3;
 
-    fn sub(self, rhs: Vec3) -> Vec3 {
+    fn sub(self, rhs: Vec3) -> Self::Output {
         Vec3 {
             x: self.x - rhs.x,
             y: self.y - rhs.y,
@@ -99,6 +133,18 @@ impl ops::Sub<Vec3> for Vec3 {
 }
 
 impl ops::Mul<f64> for Vec3 {
+    type Output = Vec3;
+
+    fn mul(self, rhs: f64) -> Self::Output {
+        Vec3 {
+            x: self.x * rhs,
+            y: self.y * rhs,
+            z: self.z * rhs,
+        }
+    }
+}
+
+impl ops::Mul<f64> for &Vec3 {
     type Output = Vec3;
 
     fn mul(self, rhs: f64) -> Self::Output {
@@ -189,6 +235,10 @@ pub struct Ray {
 }
 
 impl Ray {
+    pub fn new(pos: Vec3, dir: Vec3) -> Self {
+        Self { pos, dir }
+    }
+
     pub fn eval(&self, t: f64) -> Vec3 {
         self.pos + t * self.dir
     }

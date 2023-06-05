@@ -7,16 +7,16 @@ use crate::vec3::Vec3;
 pub struct Image {
     pub width: usize,
     pub height: usize,
-    pub maxval: u32,
-    pixels: Vec<Vec3>,
+    pub maxval: f64,
+    pub pixels: Vec<Vec3>,
 }
 
 impl Image {
-    pub fn new(width: usize, height: usize, maxval: u32) -> Self {
+    pub fn new(width: usize, height: usize, maxval: u64) -> Self {
         Self {
             width,
             height,
-            maxval,
+            maxval: maxval as f64,
             pixels: vec![Vec3::zero(); width * height],
         }
     }
@@ -27,16 +27,14 @@ impl Image {
         writeln!(f, "{}", self.maxval)?;
         for r in 0..self.height {
             for c in 0..self.width {
-                let mut color = self.pixels[self.width * r + c];
-                color = color.clamp(0.0, self.maxval as f64);
-                write!(f, "{} {} {}  ", color.x, color.y, color.z)?;
+                let color = self.pixels[self.width * r + c];
+                write!(f, "{} {} {} ", color.x as u64, color.y as u64, color.z as u64)?;
             }
-            write!(f, "\n")?;
         }
         Ok(())
     }
 
     pub fn set(&mut self, r: usize, c: usize, color: Vec3) {
-        self.pixels[self.width * r + c] = color;
+        self.pixels[self.width * r + c] = color.clamp(0., self.maxval);
     }
 }
