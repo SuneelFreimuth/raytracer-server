@@ -27,9 +27,10 @@ impl Image {
         writeln!(f, "{}", self.maxval)?;
         for r in 0..self.height {
             for c in 0..self.width {
-                let color = self.pixels[self.width * r + c];
-                write!(f, "{} {} {} ", color.x as u64, color.y as u64, color.z as u64)?;
+                let Vec3 { x, y, z } = self.pixels[self.width * r + c];
+                write!(f, "{} {} {} ", x as u64, y as u64, z as u64)?;
             }
+            write!(f, "\n")?;
         }
         Ok(())
     }

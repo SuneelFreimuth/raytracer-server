@@ -1,6 +1,9 @@
 use std::f64::consts::{FRAC_1_PI, PI};
+use std::rc::Rc;
+use std::sync::{Mutex, Arc};
 use std::time::Instant;
 use std::{fs::File, io};
+use std::thread::{spawn, JoinHandle};
 
 mod ppm;
 mod util;
@@ -9,20 +12,26 @@ mod vec3;
 use rand::random;
 use vec3::*;
 
+use crate::util::map;
+
 const WIDTH: usize = 480;
 const HEIGHT: usize = 360;
 const MAXVAL: u64 = 255;
+const NUM_SAMPLES: usize = 64;
+const NUM_THREADS: usize = 4;
 
 struct Object {
-    emission: Vec3,
+    emitted: Vec3,
+    brdf: BRDF,
     body: Body,
 }
 
 impl Object {
-    pub fn new_sphere(r: f64, pos: Vec3, emission: Vec3, brdf: BRDF) -> Self {
+    pub fn new_sphere(r: f64, pos: Vec3, emitted: Vec3, brdf: BRDF) -> Self {
         Self {
-            emission,
-            body: Body::Sphere(Sphere { pos, r, brdf }),
+            emitted,
+            brdf,
+            body: Body::Sphere(Sphere { pos, r }),
         }
     }
 }
@@ -34,7 +43,6 @@ enum Body {
 struct Sphere {
     pos: Vec3,
     r: f64,
-    brdf: BRDF,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -42,6 +50,7 @@ struct Hit {
     pub t: f64,
     pub pos: Vec3,
     pub n: Vec3,
+    pub id: usize,
 }
 
 impl Body {
@@ -66,6 +75,7 @@ impl Body {
                         t,
                         pos,
                         n: if n.dot(&-ray.dir) >= 0. { n } else { -n },
+                        id: 1000000 // One morbillion
                     });
                 }
 
@@ -77,6 +87,7 @@ impl Body {
                         t,
                         pos,
                         n: if n.dot(&-ray.dir) >= 0. { n } else { -n },
+                        id: 1000000 // One morbillion
                     });
                 }
 
@@ -147,68 +158,118 @@ fn gamma_correct(v: &Vec3) -> Vec3 {
     v.clamp(0., 1.).powf(1.0 / 2.2) * 255.0 + Vec3::repeat(0.5)
 }
 
+const MAX_BOUNCES: u64 = 5;
+const SURVIVAL_PROBABILITY: f64 = 0.9;
+
 impl Scene {
-    pub fn render(&mut self, img: &mut ppm::Image, camera: &Ray) {
+    pub fn render(&self, img: &mut ppm::Image, camera: &Ray) {
         let w = img.width as f64;
         let h = img.height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
         let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = 1;
-        let mut c: Vec<Vec3> = vec![Vec3::zero(); img.width * img.height];
-        for y in 0..img.height {
-            for x in 0..img.width {
-                let i = (img.height - y - 1) * img.width + x;
+        let num_samples = NUM_SAMPLES / 4;
+        
+        let mut workers: Vec<JoinHandle<()>> = Vec::new();
+        let mut pixels = vec![Vec3::zero(); img.width * img.height];
+        let c = Arc::new(Mutex::new(pixels));
+        let width = img.width;
+        let height = img.height;
+        for tid in 0..NUM_THREADS {
+            let c = Arc::clone(&c);
+            workers.push(spawn(move || {
+                for y in 0..height {
+                    for x in 0..width {
+                        let i = (height - y - 1) * width + x;
 
-                for sy in 0..2 {
-                    for sx in 0..2 {
-                        let mut rad = Vec3::zero();
-                        for _ in 0..num_samples {
-                            let r1 = 2. * random::<f64>();
-                            let dx = if r1 < 1. {
-                                r1.sqrt() - 1.
-                            } else {
-                                1. - (2. - r1).sqrt()
-                            };
+                        for sy in 0..2 {
+                            for sx in 0..2 {
+                                let mut rad = Vec3::zero();
+                                for _ in 0..num_samples {
+                                    let r1 = 2. * random::<f64>();
+                                    let dx = if r1 < 1. {
+                                        r1.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r1).sqrt()
+                                    };
 
-                            let r2 = 2. * random::<f64>();
-                            let dy = if r2 < 1. {
-                                r2.sqrt() - 1.
-                            } else {
-                                1. - (2. - r2).sqrt()
-                            };
+                                    let r2 = 2. * random::<f64>();
+                                    let dy = if r2 < 1. {
+                                        r2.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r2).sqrt()
+                                    };
 
-                            let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                                + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                                + camera.dir;
+                                    let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                        + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                        + camera.dir;
 
-                            rad = rad
-                                + self.received_radiance(&Ray::new(camera.pos, d.norm()), 1)
-                                    * (1. / num_samples as f64);
+                                    rad = rad
+                                        + self.received_radiance(&Ray::new(camera.pos, d.norm()))
+                                            * (1. / num_samples as f64);
+                                }
+                                let mut c = c.lock().unwrap();
+                                c[i] = c[i] + rad.clamp(0., 1.) * 0.25;
+                            }
                         }
-                        c[i] = c[i] + rad.clamp(0., 1.) * 0.25;
                     }
+                    print!(
+                        "\rRendering at {} spp ({:.1}%)",
+                        num_samples * 4,
+                        100. * y as f64 / h
+                    );
                 }
-            }
-            print!(
-                "\rRendering at {} spp ({:.1}%)",
-                num_samples * 4,
-                100. * y as f64 / h
-            );
+            }));
         }
         print!("\n");
 
+        for worker in workers {
+            worker.join();
+        }
+
         for y in 0..img.height {
             for x in 0..img.width {
-                let i = y * img.height + x;
-                img.set(y, x, gamma_correct(&c[i]));
+                let i = y * img.width + x;
+                img.set(y, x, gamma_correct(&pixels[i]));
             }
         }
     }
 
+    fn received_radiance(&self, r: &Ray) -> Vec3 {
+        if let Some(hit) = self.trace_ray(r) {
+            let obj = &self.objects[hit.id as usize];
+            obj.emitted + self.reflected_radiance(&hit, &-r.dir, 1)
+        } else {
+            Vec3::zero()
+        }
+    }
+
+    fn reflected_radiance(&self, hit: &Hit, o: &Vec3, depth: u64) -> Vec3 {
+        let p = if depth <= MAX_BOUNCES {
+            1.0
+        } else {
+            SURVIVAL_PROBABILITY
+        };
+        
+        let obj = &self.objects[hit.id];
+        let Hit { pos: x, n, .. } = hit;
+
+        if random::<f64>() < p {
+            let (i, pdf) = obj.brdf.sample(n, o);
+            if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
+                return obj.emitted +
+                    self.reflected_radiance(&next_hit, &-i, depth + 1)
+                        .mult(&obj.brdf.eval(n, o, &i)) * PI / p;
+            }
+        }
+
+        Vec3::zero()
+    }
+
     fn trace_ray(&self, ray: &Ray) -> Option<Hit> {
         let mut nearest_hit: Option<Hit> = None;
-        for obj in self.objects.iter() {
-            if let Some(hit) = obj.body.intersect(ray) {
+        for (i, obj) in self.objects.iter().enumerate() {
+            if let Some(mut hit) = obj.body.intersect(ray) {
+                hit.id = i;
                 match nearest_hit {
                     Some(nh) if hit.t < nh.t => {
                         nearest_hit = Some(hit);
@@ -221,14 +282,6 @@ impl Scene {
             }
         }
         nearest_hit
-    }
-
-    fn received_radiance(&mut self, r: &Ray, depth: usize) -> Vec3 {
-        if let Some(hit) = self.trace_ray(r) {
-            hit.n.abs().powf(2.2)
-        } else {
-            Vec3::zero()
-        }
     }
 }
 
@@ -281,10 +334,10 @@ fn main() -> io::Result<()> {
     };
 
     let mut img = ppm::Image::new(WIDTH, HEIGHT, MAXVAL);
-    let cam = Ray::new(
-        Vec3::new(50., 52., 295.6),
-        Vec3::new(0., -0.042612, -1.).norm(),
-    );
+    let cam = Ray {
+        pos: Vec3::new(50., 52., 295.6),
+        dir: Vec3::new(0., -0.042612, -1.).norm(),
+    };
 
     let now = Instant::now();
     scene.render(&mut img, &cam);
@@ -292,6 +345,16 @@ fn main() -> io::Result<()> {
     println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
 
     let mut f = File::create("image.ppm")?;
+    // let mut img = ppm::Image::new(WIDTH, HEIGHT, MAXVAL);
+    // for y in 0..img.height {
+    //     for x in 0..img.width {
+    //         img.set(y, x, Vec3::new(
+    //             x as f64 / img.width as f64 * img.maxval,
+    //             y as f64 / img.height as f64 * img.maxval,
+    //             0.,
+    //         ));
+    //     }
+    // }
     img.dump(&mut f)?;
 
     Ok(())
