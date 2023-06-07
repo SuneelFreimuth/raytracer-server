@@ -10,6 +10,7 @@ mod util;
 mod vec3;
 
 use rand::random;
+use rayon::prelude::IntoParallelIterator;
 use vec3::*;
 
 use crate::util::map;
@@ -20,6 +21,7 @@ const MAXVAL: u64 = 255;
 const NUM_SAMPLES: usize = 64;
 const NUM_THREADS: usize = 4;
 
+#[derive(Copy, Clone, Debug)]
 struct Object {
     emitted: Vec3,
     brdf: BRDF,
@@ -36,10 +38,12 @@ impl Object {
     }
 }
 
+#[derive(Copy, Clone, Debug)]
 enum Body {
     Sphere(Sphere),
 }
 
+#[derive(Copy, Clone, Debug)]
 struct Sphere {
     pos: Vec3,
     r: f64,
@@ -163,68 +167,58 @@ const SURVIVAL_PROBABILITY: f64 = 0.9;
 
 impl Scene {
     pub fn render(&self, img: &mut ppm::Image, camera: &Ray) {
-        let w = img.width as f64;
-        let h = img.height as f64;
+        let width = img.width;
+        let height = img.height;
+        let w = width as f64;
+        let h = height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
         let cy = cx.cross(&camera.dir).norm() * 0.5135;
         let num_samples = NUM_SAMPLES / 4;
         
-        let mut workers: Vec<JoinHandle<()>> = Vec::new();
         let mut pixels = vec![Vec3::zero(); img.width * img.height];
-        let c = Arc::new(Mutex::new(pixels));
-        let width = img.width;
-        let height = img.height;
-        for tid in 0..NUM_THREADS {
-            let c = Arc::clone(&c);
-            workers.push(spawn(move || {
-                for y in 0..height {
-                    for x in 0..width {
-                        let i = (height - y - 1) * width + x;
+        (0..height)
+            .into_par_iter()
+            .map(|y| {
+                for x in 0..width {
+                    let i = (height - y - 1) * width + x;
 
-                        for sy in 0..2 {
-                            for sx in 0..2 {
-                                let mut rad = Vec3::zero();
-                                for _ in 0..num_samples {
-                                    let r1 = 2. * random::<f64>();
-                                    let dx = if r1 < 1. {
-                                        r1.sqrt() - 1.
-                                    } else {
-                                        1. - (2. - r1).sqrt()
-                                    };
+                    for sy in 0..2 {
+                        for sx in 0..2 {
+                            let mut rad = Vec3::zero();
+                            for _ in 0..num_samples {
+                                let r1 = 2. * random::<f64>();
+                                let dx = if r1 < 1. {
+                                    r1.sqrt() - 1.
+                                } else {
+                                    1. - (2. - r1).sqrt()
+                                };
 
-                                    let r2 = 2. * random::<f64>();
-                                    let dy = if r2 < 1. {
-                                        r2.sqrt() - 1.
-                                    } else {
-                                        1. - (2. - r2).sqrt()
-                                    };
+                                let r2 = 2. * random::<f64>();
+                                let dy = if r2 < 1. {
+                                    r2.sqrt() - 1.
+                                } else {
+                                    1. - (2. - r2).sqrt()
+                                };
 
-                                    let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                                        + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                                        + camera.dir;
+                                let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                    + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                    + camera.dir;
 
-                                    rad = rad
-                                        + self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                                            * (1. / num_samples as f64);
-                                }
-                                let mut c = c.lock().unwrap();
-                                c[i] = c[i] + rad.clamp(0., 1.) * 0.25;
+                                rad = rad
+                                    + self.received_radiance(&Ray::new(camera.pos, d.norm()))
+                                        * (1. / num_samples as f64);
                             }
+                            pixels[i] = pixels[i] + rad.clamp(0., 1.) * 0.25;
                         }
                     }
-                    print!(
-                        "\rRendering at {} spp ({:.1}%)",
-                        num_samples * 4,
-                        100. * y as f64 / h
-                    );
                 }
-            }));
-        }
+                print!(
+                    "\rRendering at {} spp ({:.1}%)",
+                    num_samples * 4,
+                    100. * y as f64 / h
+                );
+            });
         print!("\n");
-
-        for worker in workers {
-            worker.join();
-        }
 
         for y in 0..img.height {
             for x in 0..img.width {
@@ -292,7 +286,7 @@ fn main() -> io::Result<()> {
     let black_surf = BRDF::Diffuse(Vec3::new(0.0, 0.0, 0.0));
     let bright_surf = BRDF::Diffuse(Vec3::new(0.9, 0.9, 0.9));
 
-    let mut scene = Scene {
+    let scene = Scene {
         objects: vec![
             // Left
             Object::new_sphere(
