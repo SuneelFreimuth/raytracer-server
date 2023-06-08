@@ -10,7 +10,7 @@ mod util;
 mod vec3;
 
 use rand::random;
-use rayon::prelude::IntoParallelIterator;
+use rayon::prelude::*;
 use vec3::*;
 
 use crate::util::map;
@@ -58,6 +58,13 @@ struct Hit {
 }
 
 impl Body {
+    pub fn is_sphere(&self) -> bool {
+        match self {
+            Self::Sphere(_) => true,
+            _ => false,
+        }
+    }
+    
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         match self {
             Self::Sphere(sphere) => {
@@ -152,6 +159,13 @@ impl BRDF {
             Self::Specular(_) => (o.flip_across(n), 1.0),
         }
     }
+
+    pub fn is_specular(&self) -> bool {
+        match self {
+            Self::Specular(_) => true,
+            _ => false
+        }
+    }
 }
 
 pub struct Scene {
@@ -165,23 +179,30 @@ fn gamma_correct(v: &Vec3) -> Vec3 {
 const MAX_BOUNCES: u64 = 5;
 const SURVIVAL_PROBABILITY: f64 = 0.9;
 
+fn concat<T: Clone>(a: Vec<T>, b: Vec<T>) -> Vec<T> {
+    let mut c = a.clone();
+    for el in b {
+        c.push(el);
+    }
+    c
+}
+
 impl Scene {
     pub fn render(&self, img: &mut ppm::Image, camera: &Ray) {
-        let width = img.width;
-        let height = img.height;
+        let width = img.width as usize;
+        let height = img.height as usize;
         let w = width as f64;
         let h = height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
         let cy = cx.cross(&camera.dir).norm() * 0.5135;
         let num_samples = NUM_SAMPLES / 4;
         
-        let mut pixels = vec![Vec3::zero(); img.width * img.height];
-        (0..height)
+        let pixels = (0..height)
             .into_par_iter()
-            .map(|y| {
+            .map(move |y| {
+                let y = height - y - 1;
+                let mut row = vec![Vec3::zero(); width];
                 for x in 0..width {
-                    let i = (height - y - 1) * width + x;
-
                     for sy in 0..2 {
                         for sx in 0..2 {
                             let mut rad = Vec3::zero();
@@ -204,20 +225,16 @@ impl Scene {
                                     + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
                                     + camera.dir;
 
-                                rad = rad
-                                    + self.received_radiance(&Ray::new(camera.pos, d.norm()))
+                                rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
                                         * (1. / num_samples as f64);
                             }
-                            pixels[i] = pixels[i] + rad.clamp(0., 1.) * 0.25;
+                            row[x] += rad.clamp(0., 1.) * 0.25;
                         }
                     }
                 }
-                print!(
-                    "\rRendering at {} spp ({:.1}%)",
-                    num_samples * 4,
-                    100. * y as f64 / h
-                );
-            });
+                row
+            })
+            .reduce(|| Vec::new(), |agg, x| concat(agg, x));
         print!("\n");
 
         for y in 0..img.height {
@@ -247,16 +264,65 @@ impl Scene {
         let obj = &self.objects[hit.id];
         let Hit { pos: x, n, .. } = hit;
 
-        if random::<f64>() < p {
+        if obj.brdf.is_specular() {
+            let mut rad = Vec3::zero();
+            if random::<f64>() < p {
+                let (i, pdf) = obj.brdf.sample(n, o);
+                if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
+                    return obj.emitted +
+                        self.reflected_radiance(&next_hit, &-i, depth + 1)
+                            .mult(&obj.brdf.eval(n, o, &i)) * n.dot(&i) / (pdf * p);
+                }
+            }
+            rad
+        } else {
+            let mut rad = Vec3::zero();
+            let (y, ny, pdf) = self.sample_light_source();
             let (i, pdf) = obj.brdf.sample(n, o);
-            if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
-                return obj.emitted +
-                    self.reflected_radiance(&next_hit, &-i, depth + 1)
-                        .mult(&obj.brdf.eval(n, o, &i)) * PI / p;
+            let diff = y - x;
+            let i = diff.norm();
+            let r_sqr = diff.dot(&diff);
+            let is_visible = self.mutually_visible(&x, &y);
+            rad = obj.emitted + self.objects[7].emitted.mult(&obj.brdf.eval(n, o, i)) *
+                is_visible
+
+            if random::<f64>() < p {
+                if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
+                    return obj.emitted +
+                        self.reflected_radiance(&next_hit, &-i, depth + 1)
+                            .mult(&obj.brdf.eval(n, o, &i)) * PI / p;
+                }
             }
         }
+    }
 
-        Vec3::zero()
+    fn sample_light_source(&self) -> (Vec3, Vec3, f64) {
+        let Body::Sphere(Sphere { pos: center, r }) = self.objects[7].body;
+        let xi1 = random::<f64>();
+        let xi2 = random::<f64>();
+
+        let z = 2. * xi1 - 1.;
+        let x = (1.0 - z*z).sqrt() * (2. * PI * xi2).cos();
+        let y = (1.0 - z*z).sqrt() * (2. * PI * xi2).sin();
+
+        let n = Vec3::new(x, y, z).norm();
+        let sample = center + n * r;
+        let pdf = 1.0 / (4.0 * PI * r * r);
+        (sample, n, pdf)
+    }
+
+    fn mutually_visible(&self, x: &Vec3, y: &Vec3) -> f64 {
+        const EPS: f64 = 0.001;
+        let diff = y - x;
+        let x_to_y = Ray { pos: *x, dir: diff.norm() };
+        match self.trace_ray(&x_to_y) {
+            Some(hit) => if (hit.t - diff.mag()) >= EPS {
+                1.0
+            } else {
+                0.0
+            },
+            None => 1.0
+        }
     }
 
     fn trace_ray(&self, ray: &Ray) -> Option<Hit> {
@@ -283,8 +349,9 @@ fn main() -> io::Result<()> {
     let left_wall = BRDF::Diffuse(Vec3::new(0.75, 0.25, 0.25));
     let right_wall = BRDF::Diffuse(Vec3::new(0.25, 0.25, 0.75));
     let other_wall = BRDF::Diffuse(Vec3::new(0.75, 0.75, 0.75));
-    let black_surf = BRDF::Diffuse(Vec3::new(0.0, 0.0, 0.0));
-    let bright_surf = BRDF::Diffuse(Vec3::new(0.9, 0.9, 0.9));
+    let black_surf = BRDF::Diffuse(Vec3::repeat(0.0));
+    let bright_surf = BRDF::Diffuse(Vec3::repeat(0.9));
+    let shiny_surf = BRDF::Specular(Vec3::repeat(0.999));
 
     let scene = Scene {
         objects: vec![
@@ -316,7 +383,7 @@ fn main() -> io::Result<()> {
             // Ball 1
             Object::new_sphere(16.5, Vec3::new(27., 16.5, 47.), Vec3::zero(), bright_surf),
             // Ball 2
-            Object::new_sphere(16.5, Vec3::new(73., 16.5, 78.), Vec3::zero(), bright_surf),
+            Object::new_sphere(16.5, Vec3::new(73., 16.5, 78.), Vec3::zero(), shiny_surf),
             // Light
             Object::new_sphere(
                 5.0,
