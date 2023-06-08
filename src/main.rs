@@ -1,15 +1,17 @@
 use std::f64::consts::{FRAC_1_PI, PI};
 use std::rc::Rc;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
+use std::thread::{spawn, JoinHandle};
 use std::time::Instant;
 use std::{fs::File, io};
-use std::thread::{spawn, JoinHandle};
+use std::io::Write;
 
 mod ppm;
 mod util;
 mod vec3;
 
 use rand::random;
+use rand::seq::index::sample;
 use rayon::prelude::*;
 use vec3::*;
 
@@ -18,8 +20,7 @@ use crate::util::map;
 const WIDTH: usize = 480;
 const HEIGHT: usize = 360;
 const MAXVAL: u64 = 255;
-const NUM_SAMPLES: usize = 64;
-const NUM_THREADS: usize = 4;
+static mut NUM_SAMPLES: usize = 4;
 
 #[derive(Copy, Clone, Debug)]
 struct Object {
@@ -64,7 +65,7 @@ impl Body {
             _ => false,
         }
     }
-    
+
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         match self {
             Self::Sphere(sphere) => {
@@ -86,7 +87,7 @@ impl Body {
                         t,
                         pos,
                         n: if n.dot(&-ray.dir) >= 0. { n } else { -n },
-                        id: 1000000 // One morbillion
+                        id: 1000000, // One morbillion
                     });
                 }
 
@@ -98,7 +99,7 @@ impl Body {
                         t,
                         pos,
                         n: if n.dot(&-ray.dir) >= 0. { n } else { -n },
-                        id: 1000000 // One morbillion
+                        id: 1000000, // One morbillion
                     });
                 }
 
@@ -163,7 +164,7 @@ impl BRDF {
     pub fn is_specular(&self) -> bool {
         match self {
             Self::Specular(_) => true,
-            _ => false
+            _ => false,
         }
     }
 }
@@ -195,8 +196,8 @@ impl Scene {
         let h = height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
         let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = NUM_SAMPLES / 4;
-        
+        let num_samples = unsafe { NUM_SAMPLES / 4 };
+
         let pixels = (0..height)
             .into_par_iter()
             .map(move |y| {
@@ -226,7 +227,7 @@ impl Scene {
                                     + camera.dir;
 
                                 rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                                        * (1. / num_samples as f64);
+                                    * (1. / num_samples as f64);
                             }
                             row[x] += rad.clamp(0., 1.) * 0.25;
                         }
@@ -255,44 +256,49 @@ impl Scene {
     }
 
     fn reflected_radiance(&self, hit: &Hit, o: &Vec3, depth: u64) -> Vec3 {
+        let Hit { pos: x, n, .. } = hit;
+        let obj = &self.objects[hit.id];
         let p = if depth <= MAX_BOUNCES {
             1.0
         } else {
             SURVIVAL_PROBABILITY
         };
-        
-        let obj = &self.objects[hit.id];
-        let Hit { pos: x, n, .. } = hit;
 
         if obj.brdf.is_specular() {
             let mut rad = Vec3::zero();
-            if random::<f64>() < p {
-                let (i, pdf) = obj.brdf.sample(n, o);
-                if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
-                    return obj.emitted +
-                        self.reflected_radiance(&next_hit, &-i, depth + 1)
-                            .mult(&obj.brdf.eval(n, o, &i)) * n.dot(&i) / (pdf * p);
-                }
-            }
-            rad
-        } else {
-            let mut rad = Vec3::zero();
-            let (y, ny, pdf) = self.sample_light_source();
-            let (i, pdf) = obj.brdf.sample(n, o);
-            let diff = y - x;
-            let i = diff.norm();
-            let r_sqr = diff.dot(&diff);
-            let is_visible = self.mutually_visible(&x, &y);
-            rad = obj.emitted + self.objects[7].emitted.mult(&obj.brdf.eval(n, o, i)) *
-                is_visible
 
             if random::<f64>() < p {
-                if let Some(next_hit) = self.trace_ray(&Ray::new(*x, i)) {
-                    return obj.emitted +
-                        self.reflected_radiance(&next_hit, &-i, depth + 1)
-                            .mult(&obj.brdf.eval(n, o, &i)) * PI / p;
+                let (i, pdf) = obj.brdf.sample(n, o);
+                if let Some(hit) = self.trace_ray(&Ray::new(*x, i)) {
+                    rad = self.objects[hit.id].emitted + self.reflected_radiance(&hit, o, depth + 1)
+                        .mult(&obj.brdf.eval(n, o, &i)) * n.dot(&i) / (pdf * p);
                 }
             }
+            
+            rad
+        } else {
+            let (y, ny, pdf) = self.sample_light_source();
+            let i = (y - x).norm();
+            let r_sqr = (y - x).dot(&(y - x));
+            let visibility = self.mutually_visible(&x, &y);
+            let mut rad = self.objects[7].emitted.mult(&obj.brdf.eval(n, o, &i))
+                * visibility
+                * n.dot(&i)
+                * ny.dot(&-i)
+                / (r_sqr * pdf);
+
+            if random::<f64>() < p {
+                let (i, pdf) = obj.brdf.sample(n, o);
+                if let Some(hit) = self.trace_ray(&Ray::new(*x, i)) {
+                    rad += self
+                        .reflected_radiance(&hit, &-i, depth + 1)
+                        .mult(&obj.brdf.eval(n, o, &i))
+                        * n.dot(&i)
+                        / (pdf * p);
+                }
+            }
+
+            rad
         }
     }
 
@@ -302,8 +308,8 @@ impl Scene {
         let xi2 = random::<f64>();
 
         let z = 2. * xi1 - 1.;
-        let x = (1.0 - z*z).sqrt() * (2. * PI * xi2).cos();
-        let y = (1.0 - z*z).sqrt() * (2. * PI * xi2).sin();
+        let x = (1.0 - z * z).sqrt() * (2. * PI * xi2).cos();
+        let y = (1.0 - z * z).sqrt() * (2. * PI * xi2).sin();
 
         let n = Vec3::new(x, y, z).norm();
         let sample = center + n * r;
@@ -312,16 +318,21 @@ impl Scene {
     }
 
     fn mutually_visible(&self, x: &Vec3, y: &Vec3) -> f64 {
-        const EPS: f64 = 0.001;
+        const ERR_MARGIN: f64 = 0.001;
         let diff = y - x;
-        let x_to_y = Ray { pos: *x, dir: diff.norm() };
+        let x_to_y = Ray {
+            pos: *x,
+            dir: diff.norm(),
+        };
         match self.trace_ray(&x_to_y) {
-            Some(hit) => if (hit.t - diff.mag()) >= EPS {
-                1.0
-            } else {
-                0.0
-            },
-            None => 1.0
+            Some(hit) => {
+                if hit.t + ERR_MARGIN >= diff.mag() {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            None => 1.0,
         }
     }
 
@@ -333,10 +344,10 @@ impl Scene {
                 match nearest_hit {
                     Some(nh) if hit.t < nh.t => {
                         nearest_hit = Some(hit);
-                    },
+                    }
                     None => {
                         nearest_hit = Some(hit);
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -346,6 +357,13 @@ impl Scene {
 }
 
 fn main() -> io::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        unsafe {
+            NUM_SAMPLES = args[1].parse::<usize>().expect("if provided, first argument must be an integer.");
+        }
+    }
+
     let left_wall = BRDF::Diffuse(Vec3::new(0.75, 0.25, 0.25));
     let right_wall = BRDF::Diffuse(Vec3::new(0.25, 0.25, 0.75));
     let other_wall = BRDF::Diffuse(Vec3::new(0.75, 0.75, 0.75));
