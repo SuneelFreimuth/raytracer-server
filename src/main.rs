@@ -1,28 +1,32 @@
 use std::f64::consts::{FRAC_1_PI, PI};
+use std::io::{BufReader, BufWriter, Write, stdout};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::thread::{spawn, JoinHandle};
 use std::time::Instant;
 use std::{fs::File, io};
-use std::io::Write;
 
 mod ppm;
 mod util;
 mod vec3;
+mod octree;
 
+use obj::{load_obj, Obj};
 use rand::random;
 use rand::seq::index::sample;
 use rayon::prelude::*;
+
 use vec3::*;
 
-use crate::util::map;
+use util::map;
+use octree::BoundingBox;
 
 const WIDTH: usize = 480;
 const HEIGHT: usize = 360;
 const MAXVAL: u64 = 255;
 static mut NUM_SAMPLES: usize = 4;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 struct Object {
     emitted: Vec3,
     brdf: BRDF,
@@ -39,9 +43,11 @@ impl Object {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 enum Body {
     Sphere(Sphere),
+    Plane(Plane),
+    Mesh(Mesh),
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -50,7 +56,20 @@ struct Sphere {
     r: f64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Copy, Clone, Debug)]
+struct Plane {
+    pos: Vec3,
+    n: Vec3,
+}
+
+#[derive(Clone, Debug)]
+struct Mesh {
+    vertices: Vec<Vec3>,
+    normals: Vec<Vec3>,
+    indices: Vec<usize>,
+}
+
+#[derive(Copy, Debug, Clone)]
 struct Hit {
     pub t: f64,
     pub pos: Vec3,
@@ -64,6 +83,16 @@ impl Body {
             Self::Sphere(_) => true,
             _ => false,
         }
+    }
+
+    pub fn new_mesh(path: &str) -> obj::ObjResult<Self> {
+        let f = BufReader::new(File::open(path)?);
+        let model: Obj<obj::Vertex, usize> = load_obj(f)?;
+        Ok(Self::Mesh(Mesh {
+            vertices: model.vertices.iter().map(|v| v.position.into()).collect(),
+            normals: model.vertices.iter().map(|v| v.normal.into()).collect(),
+            indices: model.indices,
+        }))
     }
 
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
@@ -105,6 +134,27 @@ impl Body {
 
                 None
             }
+            Self::Plane(Plane { pos, n }) => {
+                let d_dot_n = ray.dir.dot(n);
+                if d_dot_n.abs() < 0.0001 {
+                    return None;
+                }
+                let t = (pos - &ray.pos).dot(n) / ray.dir.dot(n);
+                if t >= 0. {
+                    // println!("{:?} hit plane at {:?} with normal {:?}",
+                    //     ray, ray.eval(t), n);
+                    let n = if n.dot(&-ray.dir) >= 0. { *n } else { -*n };
+                    Some(Hit {
+                        t,
+                        pos: ray.eval(t) + n * 0.00001,
+                        n,
+                        id: 1000000,
+                    })
+                } else {
+                    None
+                }
+            }
+            Self::Mesh(mesh) => None,
         }
     }
 }
@@ -270,11 +320,15 @@ impl Scene {
             if random::<f64>() < p {
                 let (i, pdf) = obj.brdf.sample(n, o);
                 if let Some(hit) = self.trace_ray(&Ray::new(*x, i)) {
-                    rad = self.objects[hit.id].emitted + self.reflected_radiance(&hit, o, depth + 1)
-                        .mult(&obj.brdf.eval(n, o, &i)) * n.dot(&i) / (pdf * p);
+                    rad = self.objects[hit.id].emitted
+                        + self
+                            .reflected_radiance(&hit, o, depth + 1)
+                            .mult(&obj.brdf.eval(n, o, &i))
+                            * n.dot(&i)
+                            / (pdf * p);
                 }
             }
-            
+
             rad
         } else {
             let (y, ny, pdf) = self.sample_light_source();
@@ -303,18 +357,22 @@ impl Scene {
     }
 
     fn sample_light_source(&self) -> (Vec3, Vec3, f64) {
-        let Body::Sphere(Sphere { pos: center, r }) = self.objects[7].body;
-        let xi1 = random::<f64>();
-        let xi2 = random::<f64>();
+        match self.objects[7].body {
+            Body::Sphere(Sphere { pos: center, r }) => {
+                let xi1 = random::<f64>();
+                let xi2 = random::<f64>();
 
-        let z = 2. * xi1 - 1.;
-        let x = (1.0 - z * z).sqrt() * (2. * PI * xi2).cos();
-        let y = (1.0 - z * z).sqrt() * (2. * PI * xi2).sin();
+                let z = 2. * xi1 - 1.;
+                let x = (1.0 - z * z).sqrt() * (2. * PI * xi2).cos();
+                let y = (1.0 - z * z).sqrt() * (2. * PI * xi2).sin();
 
-        let n = Vec3::new(x, y, z).norm();
-        let sample = center + n * r;
-        let pdf = 1.0 / (4.0 * PI * r * r);
-        (sample, n, pdf)
+                let n = Vec3::new(x, y, z).norm();
+                let sample = center + n * r;
+                let pdf = 1.0 / (4.0 * PI * r * r);
+                (sample, n, pdf)
+            }
+            _ => unimplemented!(),
+        }
     }
 
     fn mutually_visible(&self, x: &Vec3, y: &Vec3) -> f64 {
@@ -360,7 +418,9 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         unsafe {
-            NUM_SAMPLES = args[1].parse::<usize>().expect("if provided, first argument must be an integer.");
+            NUM_SAMPLES = args[1]
+                .parse::<usize>()
+                .expect("if provided, first argument must be an integer.");
         }
     }
 
@@ -371,44 +431,95 @@ fn main() -> io::Result<()> {
     let bright_surf = BRDF::Diffuse(Vec3::repeat(0.9));
     let shiny_surf = BRDF::Specular(Vec3::repeat(0.999));
 
+    let bunny = Object {
+        brdf: bright_surf,
+        emitted: Vec3::zero(),
+        body: Body::new_mesh("bunny.obj").expect("could not open bunny"),
+        // body: Body::Sphere(Sphere {
+        //     pos: Vec3::new(27., 16.5, 47.),
+        //     r: 16.5,
+        // }),
+    };
+
+    if let Body::Mesh(ref mesh) = bunny.body {
+        println!("bunny bounding box: {:?}", BoundingBox::enclose(&mesh.vertices));
+    }
+
     let scene = Scene {
         objects: vec![
             // Left
-            Object::new_sphere(
-                1e5,
-                Vec3::new(1e5 + 1., 40.8, 81.6),
-                Vec3::zero(),
-                left_wall,
-            ),
+            Object {
+                brdf: left_wall,
+                emitted: Vec3::zero(),
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(1., 40.8, 81.6),
+                    n: Vec3::new(1., 0., 0.),
+                }),
+                // body: Body::Sphere(Sphere {
+                //     pos: Vec3::new(1e5 + 1., 40.8, 81.6),
+                //     r: 1e5,
+                // }),
+            },
             // Right
-            Object::new_sphere(
-                1e5,
-                Vec3::new(-1.0e5 + 99., 40.8, 81.6),
-                Vec3::zero(),
-                right_wall,
-            ),
+            Object {
+                brdf: right_wall,
+                emitted: Vec3::zero(),
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(99., 40.8, 81.6),
+                    n: Vec3::new(-1., 0., 0.),
+                }),
+                // body: Body::Sphere(Sphere {
+                //     pos: Vec3::new(-1.0e5 + 99., 40.8, 81.6),
+                //     r: 1e5,
+                // }),
+            },
             // Back
-            Object::new_sphere(1e5, Vec3::new(50., 40.8, 1e5), Vec3::zero(), other_wall),
+            Object {
+                emitted: Vec3::zero(),
+                brdf: other_wall,
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(50., 40.8, 0.),
+                    n: Vec3::new(0., 0., -1.),
+                }),
+            },
             // Bottom
-            Object::new_sphere(1e5, Vec3::new(50., 1e5, 81.6), Vec3::zero(), other_wall),
+            Object {
+                brdf: other_wall,
+                emitted: Vec3::zero(),
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(50., 0., 81.6),
+                    n: Vec3::new(0., 1., 0.),
+                }),
+            },
             // Top
-            Object::new_sphere(
-                1e5,
-                Vec3::new(50., -1e5 + 81.6, 81.6),
-                Vec3::zero(),
-                other_wall,
-            ),
+            Object {
+                brdf: other_wall,
+                emitted: Vec3::zero(),
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(50., 81.6, 81.6),
+                    n: Vec3::new(0., -1., 0.),
+                }),
+            },
             // Ball 1
-            Object::new_sphere(16.5, Vec3::new(27., 16.5, 47.), Vec3::zero(), bright_surf),
+            bunny,
             // Ball 2
-            Object::new_sphere(16.5, Vec3::new(73., 16.5, 78.), Vec3::zero(), shiny_surf),
+            Object {
+                brdf: shiny_surf,
+                emitted: Vec3::zero(),
+                body: Body::Sphere(Sphere {
+                    pos: Vec3::new(73., 16.5, 78.),
+                    r: 16.5,
+                }),
+            },
             // Light
-            Object::new_sphere(
-                5.0,
-                Vec3::new(50., 70.0, 81.6),
-                Vec3::new(50., 50., 50.),
-                black_surf,
-            ),
+            Object {
+                brdf: black_surf,
+                emitted: Vec3::repeat(50.),
+                body: Body::Sphere(Sphere {
+                    pos: Vec3::new(50., 70., 81.6),
+                    r: 5.,
+                }),
+            }
         ],
     };
 
@@ -423,18 +534,12 @@ fn main() -> io::Result<()> {
     let elapsed = now.elapsed();
     println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
 
-    let mut f = File::create("image.ppm")?;
-    // let mut img = ppm::Image::new(WIDTH, HEIGHT, MAXVAL);
-    // for y in 0..img.height {
-    //     for x in 0..img.width {
-    //         img.set(y, x, Vec3::new(
-    //             x as f64 / img.width as f64 * img.maxval,
-    //             y as f64 / img.height as f64 * img.maxval,
-    //             0.,
-    //         ));
-    //     }
-    // }
-    img.dump(&mut f)?;
+    let f = File::create("image.ppm")?;
+    let mut w = BufWriter::new(f);
+    let now = Instant::now();
+    img.dump(&mut w)?;
+    let elapsed = now.elapsed();
+    println!("Dumped to file in {:.5} seconds.", elapsed.as_secs_f64());
 
     Ok(())
 }

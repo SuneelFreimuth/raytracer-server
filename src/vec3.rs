@@ -85,6 +85,16 @@ impl Vec3 {
     }
 }
 
+impl From<[f32; 3]> for Vec3 {
+    fn from(value: [f32; 3]) -> Self {
+        Self {
+            x: value[0] as f64,
+            y: value[1] as f64,
+            z: value[2] as f64
+        }
+    }
+}
+
 impl ops::Neg for Vec3 {
     type Output = Self;
 

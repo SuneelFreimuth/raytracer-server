@@ -21,7 +21,7 @@ impl Image {
         }
     }
 
-    pub fn dump(&self, f: &mut File) -> io::Result<()> {
+    pub fn dump<T: Write>(&self, f: &mut T) -> io::Result<()> {
         writeln!(f, "P3")?;
         writeln!(f, "{} {}", self.width, self.height)?;
         writeln!(f, "{}", self.maxval)?;
