@@ -85,6 +85,12 @@ impl Vec3 {
     }
 }
 
+pub fn determinant3(v0: &Vec3, v1: &Vec3, v2: &Vec3) -> f64 {
+    v0.x * (v1.y * v2.z - v1.z * v2.y) +
+    v1.x * (v0.y * v2.z - v0.z * v2.y) +
+    v2.x * (v0.y * v2.z - v0.z * v2.y)
+}
+
 impl From<[f32; 3]> for Vec3 {
     fn from(value: [f32; 3]) -> Self {
         Self {

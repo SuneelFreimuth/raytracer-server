@@ -69,6 +69,79 @@ struct Mesh {
     indices: Vec<usize>,
 }
 
+struct Triangle {
+    v0: Vec3,
+    v1: Vec3,
+    v2: Vec3
+}
+
+impl Triangle {
+    pub fn normal(&self) -> Vec3 {
+        (self.v2 - self.v0).cross(&(self.v1 - self.v0)).norm()
+    }
+
+    pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        // Moller-Trumbore ray intersection algorithm.
+        let n = self.normal();
+        if n.dot(r.dir) < 0.0001 {
+            return None
+        }
+
+        let e1 = self.v1 - self.v0;
+        let e2 = self.v2 - self.v0;
+        let b = ray.pos - self.v0;
+
+        let det = determinant3(&-ray.dir, &e1, &e2);
+
+        let t = determinant3(b, &e1, &e2) / det;
+        let u = determinant3(b, &e1, &e2) / det;
+        let v = determinant3(b, &e1, &e2) / det;
+
+        if ((u + v) - 
+
+        None
+    }
+}
+
+struct TriangleIterator<'a> {
+    mesh: &'a Mesh,
+    i: usize
+}
+
+impl<'a> Iterator for TriangleIterator<'a> {
+    type Item = Triangle;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < self.mesh.num_triangles() {
+            let t = self.mesh.get_triangle(self.i);
+            self.i += 1;
+            Some(t)
+        } else {
+            None
+        }
+    }
+}
+
+impl Mesh {
+    pub fn num_triangles(&self) -> usize {
+        self.indices.len() / 3
+    }
+
+    pub fn get_triangle(&self, i: usize) -> Triangle {
+        let v0 = self.vertices[self.indices[i / 3]];
+        let v1 = self.vertices[self.indices[i / 3 + 1]];
+        let v2 = self.vertices[self.indices[i / 3 + 2]];
+        Triangle { v0, v1, v2 }
+    }
+
+    pub fn triangles(&self) -> TriangleIterator {
+        TriangleIterator {
+            mesh: self,
+            i: 0
+        }
+    }
+}
+
 #[derive(Copy, Debug, Clone)]
 struct Hit {
     pub t: f64,
@@ -78,19 +151,12 @@ struct Hit {
 }
 
 impl Body {
-    pub fn is_sphere(&self) -> bool {
-        match self {
-            Self::Sphere(_) => true,
-            _ => false,
-        }
-    }
-
     pub fn new_mesh(path: &str) -> obj::ObjResult<Self> {
         let f = BufReader::new(File::open(path)?);
         let model: Obj<obj::Vertex, usize> = load_obj(f)?;
         Ok(Self::Mesh(Mesh {
             vertices: model.vertices.iter().map(|v| v.position.into()).collect(),
-            normals: model.vertices.iter().map(|v| v.normal.into()).collect(),
+            normals: model.vertices.iter().map(|v| Vec3::from(v.normal).norm()).collect(),
             indices: model.indices,
         }))
     }
@@ -154,7 +220,14 @@ impl Body {
                     None
                 }
             }
-            Self::Mesh(mesh) => None,
+            Self::Mesh(mesh) => {
+                for tri in mesh.triangles() {
+                    if let Some(hit) = tri.intersect(ray) {
+                        return Some(hit)
+                    }
+                }
+                None
+            },
         }
     }
 }
@@ -431,18 +504,19 @@ fn main() -> io::Result<()> {
     let bright_surf = BRDF::Diffuse(Vec3::repeat(0.9));
     let shiny_surf = BRDF::Specular(Vec3::repeat(0.999));
 
-    let bunny = Object {
+    let mesh = Object {
         brdf: bright_surf,
         emitted: Vec3::zero(),
-        body: Body::new_mesh("bunny.obj").expect("could not open bunny"),
+        body: Body::new_mesh("assets/chair2.obj").expect("could not open chair"),
         // body: Body::Sphere(Sphere {
         //     pos: Vec3::new(27., 16.5, 47.),
         //     r: 16.5,
         // }),
     };
 
-    if let Body::Mesh(ref mesh) = bunny.body {
-        println!("bunny bounding box: {:?}", BoundingBox::enclose(&mesh.vertices));
+    if let Body::Mesh(ref mesh) = mesh.body {
+        println!("Mesh has {} vertices, {} normals, and {} indices.", mesh.vertices.len(), mesh.normals.len(), mesh.indices.len());
+        println!("mesh bounding box: {:?}", BoundingBox::enclose(&mesh.vertices));
     }
 
     let scene = Scene {
@@ -501,7 +575,15 @@ fn main() -> io::Result<()> {
                 }),
             },
             // Ball 1
-            bunny,
+            mesh,
+            // Object {
+            //     brdf: bright_surf,
+            //     emitted: Vec3::zero(),
+            //     body: Body::Sphere(Sphere {
+            //         pos: Vec3::new(27., 16.5, 47.),
+            //         r: 16.5,
+            //     }),
+            // },
             // Ball 2
             Object {
                 brdf: shiny_surf,
