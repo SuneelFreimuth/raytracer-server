@@ -83,12 +83,20 @@ impl Vec3 {
             z: clamp(self.z, low, high),
         }
     }
+
+    pub fn rotate_y(&self, angle: f64) -> Self {
+        Self {
+            x: self.x * angle.cos() + self.z * angle.sin(),
+            y: self.y,
+            z: self.z * angle.cos() - self.x * angle.sin()
+        }
+    }
 }
 
 pub fn determinant3(v0: &Vec3, v1: &Vec3, v2: &Vec3) -> f64 {
-    v0.x * (v1.y * v2.z - v1.z * v2.y) +
+    v0.x * (v1.y * v2.z - v1.z * v2.y) -
     v1.x * (v0.y * v2.z - v0.z * v2.y) +
-    v2.x * (v0.y * v2.z - v0.z * v2.y)
+    v2.x * (v0.y * v1.z - v0.z * v1.y)
 }
 
 impl From<[f32; 3]> for Vec3 {
@@ -138,7 +146,15 @@ impl ops::Add<Vec3> for &Vec3 {
 }
 
 impl ops::AddAssign for Vec3 {
-    fn add_assign(&mut self, rhs: Self) {
+    fn add_assign(&mut self, rhs: Vec3) {
+        self.x += rhs.x;
+        self.y += rhs.y;
+        self.z += rhs.z;
+    }
+}
+
+impl ops::AddAssign<&Vec3> for Vec3 {
+    fn add_assign(&mut self, rhs: &Vec3) {
         self.x += rhs.x;
         self.y += rhs.y;
         self.z += rhs.z;
