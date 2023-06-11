@@ -1,7 +1,6 @@
 use std::ops;
 use crate::util::clamp;
 
-#[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub struct Vec3 {
     pub x: f64,

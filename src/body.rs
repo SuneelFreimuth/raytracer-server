@@ -373,6 +373,97 @@ impl BoundingBox {
         Self { min, max }
     }
 
+    pub fn enclose_triangle(triangle: &Triangle) -> Self {
+        let Triangle { v0, v1, v2 } = triangle;
+        let mut min = v0.clone();
+        let mut max = v0.clone();
+
+        for p in [v1, v2] {
+            if p.x < min.x {
+                min.x = p.x;
+            }
+            if p.x > max.x {
+                max.x = p.x;
+            }
+
+            if p.y < min.y {
+                min.y = p.y;
+            }
+            if p.y > max.y {
+                max.y = p.y;
+            }
+
+            if p.z < min.z {
+                min.z = p.z;
+            }
+            if p.z > max.z {
+                max.z = p.z;
+            }
+        }
+        
+        Self { min, max }
+    }
+
+    pub fn enclose_triangles(triangles: &Vec<Triangle>) -> Self {
+        let mut min = Vec3::repeat(f64::INFINITY);
+        let mut max = Vec3::repeat(-f64::INFINITY);
+        for Triangle { v0, v1, v2 } in triangles {
+            for p in [v0, v1, v2] {
+                if p.x < min.x {
+                    min.x = p.x;
+                }
+                if p.x > max.x {
+                    max.x = p.x;
+                }
+
+                if p.y < min.y {
+                    min.y = p.y;
+                }
+                if p.y > max.y {
+                    max.y = p.y;
+                }
+
+                if p.z < min.z {
+                    min.z = p.z;
+                }
+                if p.z > max.z {
+                    max.z = p.z;
+                }
+            }
+        }
+        Self { min, max }
+    }
+
+    pub fn contains(&self, p: &Vec3) -> bool {
+        self.min.x <= p.x && p.x < self.max.x &&
+        self.min.y <= p.y && p.y < self.max.y &&
+        self.min.z <= p.z && p.z < self.max.z
+    }
+
+    fn _overlaps(&self, b: &Self) -> bool {
+        let Vec3 { x, y, z } = b.min;
+        let sx = b.max.x - b.min.x;
+        let sy = b.max.y - b.min.y;
+        let sz = b.max.z - b.min.z;
+
+        self.contains(&b.min) ||
+        self.contains(&b.max) ||
+        self.contains(&Vec3::new(x, y, z + sz)) ||
+        self.contains(&Vec3::new(x, y + sy, z)) ||
+        self.contains(&Vec3::new(x, y + sy, z + sz)) ||
+        self.contains(&Vec3::new(x + sx, y, z)) ||
+        self.contains(&Vec3::new(x + sx, y, z + sz)) ||
+        self.contains(&Vec3::new(x + sx, y + sy, z))
+    }
+
+    pub fn overlaps(&self, b: &Self) -> bool {
+        self._overlaps(b) || b._overlaps(self)
+    }
+
+    pub fn overlaps_triangle(&self, t: &Triangle) -> bool {
+        self.overlaps(&Self::enclose_triangle(t))
+    }
+
     pub fn center(&self) -> Vec3 {
         (self.max + self.min) / 2.
     }
@@ -395,9 +486,15 @@ impl Octree {
     const MAX_TRIS_IN_NODE: usize = 9;
 
     pub fn new(triangles: Vec<Triangle>) -> Self {
+        let mut nodes: Vec<Node> = Vec::new();
+
         Self {
-            nodes: Vec::new(),
-            bounding_box: BoundingBox::new(Vec3::zero(), Vec3::zero())
+            nodes,
+            bounding_box: BoundingBox::enclose_triangles(&triangles)
         }
+    }
+
+    fn build(triangles: &Vec<Triangle>, nodes: &mut Vec<Node>, depth: usize) {
+
     }
 }
