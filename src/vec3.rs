@@ -1,7 +1,7 @@
 use std::ops;
 use crate::util::clamp;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Copy)]
 pub struct Vec3 {
     pub x: f64,
     pub y: f64,

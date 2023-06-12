@@ -1,8 +1,8 @@
-use std::iter::Iterator;
-use std::io::BufRead;
 use obj::{load_obj, Obj};
+use std::io::BufRead;
+use std::iter::Iterator;
 
-use crate::vec3::{determinant3, Vec3, Ray};
+use crate::vec3::{determinant3, Ray, Vec3};
 
 #[derive(Clone, Debug)]
 pub enum Body {
@@ -28,7 +28,7 @@ pub struct Mesh {
     pub vertices: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub indices: Vec<usize>,
-    pub octree: Octree,
+    pub octree: Option<Octree>,
     pub bounding_box: BoundingBox,
 }
 
@@ -101,36 +101,22 @@ impl Body {
                 }
             }
             Self::Mesh(mesh) => {
-                let mut nearest_hit: Option<Hit> = None;
-                for tri in mesh.triangles() {
-                    if let Some(hit) = tri.intersect(ray) {
-                        match nearest_hit {
-                            Some(nh) => {
-                                if hit.t < nh.t {
-                                    nearest_hit = Some(hit);
-                                }
-                            }
-                            None => {
-                                nearest_hit = Some(hit);
-                            }
-                        }
-                    }
-                }
-                nearest_hit
+                mesh.intersect(ray)
             }
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Triangle {
-    v0: Vec3,
-    v1: Vec3,
-    v2: Vec3,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
 }
 
 impl Triangle {
     pub fn normal(&self) -> Vec3 {
-        (self.v2 - self.v0).cross(&(self.v1 - self.v0)).norm()
+        (self.c - self.a).cross(&(self.b - self.a)).norm()
     }
 
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
@@ -140,9 +126,9 @@ impl Triangle {
             return None;
         }
 
-        let e1 = self.v1 - self.v0;
-        let e2 = self.v2 - self.v0;
-        let b = ray.pos - self.v0;
+        let e1 = self.b - self.a;
+        let e2 = self.c - self.a;
+        let b = ray.pos - self.a;
 
         let det = determinant3(&-ray.dir, &e1, &e2);
 
@@ -173,9 +159,9 @@ impl Triangle {
 fn test_triangle_intersection() {
     // Triangle in XY-plane
     let t = Triangle {
-        v0: Vec3::new(-1., -1., 0.),
-        v1: Vec3::new(1., -1., 0.),
-        v2: Vec3::new(0., 1., 0.),
+        a: Vec3::new(-1., -1., 0.),
+        b: Vec3::new(1., -1., 0.),
+        c: Vec3::new(0., 1., 0.),
     };
     // Ray 1 unit off the XY-plane pointing directly into the triangle
     let r = Ray {
@@ -215,7 +201,7 @@ impl<'a> Iterator for TriangleIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.i < self.mesh.num_triangles() {
-            let t = self.mesh.get_triangle(self.i);
+            let t = self.mesh.triangle(self.i);
             self.i += 1;
             Some(t)
         } else {
@@ -226,14 +212,17 @@ impl<'a> Iterator for TriangleIterator<'a> {
 
 impl Mesh {
     pub fn new(vertices: Vec<Vec3>, normals: Vec<Vec3>, indices: Vec<usize>) -> Self {
-        let mut triangles: Vec<Triangle> = Vec::new();
+        let mut triangles: Vec<(usize, Triangle)> = Vec::new();
         let mut i = 0;
         while i < indices.len() {
-            triangles.push(Triangle {
-                v0: vertices[indices[i]],
-                v1: vertices[indices[i + 1]],
-                v2: vertices[indices[i + 2]],
-            });
+            triangles.push((
+                i / 3,
+                Triangle {
+                    a: vertices[indices[i]],
+                    b: vertices[indices[i + 1]],
+                    c: vertices[indices[i + 2]],
+                },
+            ));
             i += 3;
         }
         Self {
@@ -241,7 +230,7 @@ impl Mesh {
             vertices,
             normals,
             indices,
-            octree: Octree::new(triangles),
+            octree: None,
         }
     }
 
@@ -257,6 +246,10 @@ impl Mesh {
                 .collect(),
             model.indices,
         ))
+    }
+
+    pub fn accelerate(&mut self) {
+        self.octree = Some(Octree::build(self));
     }
 
     pub fn cube(p: &Vec3, s: f64) -> Self {
@@ -280,7 +273,7 @@ impl Mesh {
                 4, 5, 7, 4, 6, 7, // Right
                 2, 3, 7, 2, 6, 7, // Top
                 0, 1, 5, 0, 4, 5, // Bottom
-            ]
+            ],
         )
     }
 
@@ -288,15 +281,39 @@ impl Mesh {
         self.indices.len() / 3
     }
 
-    pub fn get_triangle(&self, i: usize) -> Triangle {
-        let v0 = self.vertices[self.indices[i * 3]];
-        let v1 = self.vertices[self.indices[i * 3 + 1]];
-        let v2 = self.vertices[self.indices[i * 3 + 2]];
-        Triangle { v0, v1, v2 }
+    pub fn triangle(&self, i: usize) -> Triangle {
+        let a = self.vertices[self.indices[i * 3]];
+        let b = self.vertices[self.indices[i * 3 + 1]];
+        let c = self.vertices[self.indices[i * 3 + 2]];
+        Triangle { a, b, c }
     }
 
     pub fn triangles(&self) -> TriangleIterator {
         TriangleIterator { mesh: self, i: 0 }
+    }
+
+    pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        if let Some(octree) = &self.octree {
+            octree.intersect(ray)
+        } else {
+            // Brute force
+            let mut nearest_hit: Option<Hit> = None;
+            for tri in self.triangles() {
+                if let Some(hit) = tri.intersect(ray) {
+                    match nearest_hit {
+                        Some(nh) => {
+                            if hit.t < nh.t {
+                                nearest_hit = Some(hit);
+                            }
+                        }
+                        None => {
+                            nearest_hit = Some(hit);
+                        }
+                    }
+                }
+            }
+            nearest_hit
+        }
     }
 
     // Defined as the centroid
@@ -334,10 +351,10 @@ impl Mesh {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, PartialEq, Debug)]
 pub struct BoundingBox {
     pub min: Vec3,
-    pub max: Vec3
+    pub max: Vec3,
 }
 
 impl BoundingBox {
@@ -374,11 +391,11 @@ impl BoundingBox {
     }
 
     pub fn enclose_triangle(triangle: &Triangle) -> Self {
-        let Triangle { v0, v1, v2 } = triangle;
-        let mut min = v0.clone();
-        let mut max = v0.clone();
+        let Triangle { a, b, c } = triangle;
+        let mut min = a.clone();
+        let mut max = a.clone();
 
-        for p in [v1, v2] {
+        for p in [b, c] {
             if p.x < min.x {
                 min.x = p.x;
             }
@@ -400,15 +417,15 @@ impl BoundingBox {
                 max.z = p.z;
             }
         }
-        
+
         Self { min, max }
     }
 
     pub fn enclose_triangles(triangles: &Vec<Triangle>) -> Self {
         let mut min = Vec3::repeat(f64::INFINITY);
         let mut max = Vec3::repeat(-f64::INFINITY);
-        for Triangle { v0, v1, v2 } in triangles {
-            for p in [v0, v1, v2] {
+        for Triangle { a, b, c } in triangles {
+            for p in [a, b, c] {
                 if p.x < min.x {
                     min.x = p.x;
                 }
@@ -434,67 +451,342 @@ impl BoundingBox {
         Self { min, max }
     }
 
-    pub fn contains(&self, p: &Vec3) -> bool {
-        self.min.x <= p.x && p.x < self.max.x &&
-        self.min.y <= p.y && p.y < self.max.y &&
-        self.min.z <= p.z && p.z < self.max.z
-    }
-
     fn _overlaps(&self, b: &Self) -> bool {
-        let Vec3 { x, y, z } = b.min;
-        let sx = b.max.x - b.min.x;
-        let sy = b.max.y - b.min.y;
-        let sz = b.max.z - b.min.z;
-
-        self.contains(&b.min) ||
-        self.contains(&b.max) ||
-        self.contains(&Vec3::new(x, y, z + sz)) ||
-        self.contains(&Vec3::new(x, y + sy, z)) ||
-        self.contains(&Vec3::new(x, y + sy, z + sz)) ||
-        self.contains(&Vec3::new(x + sx, y, z)) ||
-        self.contains(&Vec3::new(x + sx, y, z + sz)) ||
-        self.contains(&Vec3::new(x + sx, y + sy, z))
+        self.min.x <= b.max.x &&
+        self.max.x >= b.min.x &&
+        self.min.y <= b.max.y &&
+        self.max.y >= b.min.y &&
+        self.min.z <= b.max.z &&
+        self.max.z >= b.min.z
     }
 
     pub fn overlaps(&self, b: &Self) -> bool {
         self._overlaps(b) || b._overlaps(self)
     }
 
+    pub fn contains(&self, p: &Vec3) -> bool {
+        self.min.x <= p.x
+            && p.x <= self.max.x
+            && self.min.y <= p.y
+            && p.y <= self.max.y
+            && self.min.z <= p.z
+            && p.z <= self.max.z
+    }
+
+    pub fn intersect(&self, r: &Ray) -> Option<f64> {
+        const EPS: f64 = 0.0000001;
+        let BoundingBox { min, max } = self;
+
+        // Intersects left?
+        let t = (min.x - r.pos.x) / r.dir.x;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.y <= p.y && p.y <= max.y && min.z <= p.z && p.z <= max.z {
+                return Some(t);
+            }
+        }
+
+        // Intersects right?
+        let t = (max.x - r.pos.x) / r.dir.x;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.y <= p.y && p.y <= max.y && min.z <= p.z && p.z <= max.z {
+                return Some(t);
+            }
+        }
+
+        // Intersects bottom?
+        let t = (min.y - r.pos.y) / r.dir.y;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.x <= p.x && p.x <= max.x && min.z <= p.z && p.z <= max.z {
+                return Some(t);
+            }
+        }
+
+        // Intersects top?
+        let t = (max.y - r.pos.y) / r.dir.y;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.x <= p.x && p.x <= max.x && min.z <= p.z && p.z <= max.z {
+                return Some(t);
+            }
+        }
+
+        // Intersects back?
+        let t = (min.z - r.pos.z) / r.dir.z;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.x <= p.x && p.x <= max.x && min.y <= p.y && p.y <= max.y {
+                return Some(t);
+            }
+        }
+
+        // Intersects front?
+        let t = (max.z - r.pos.z) / r.dir.z;
+        if t >= EPS {
+            let p = r.eval(t);
+            if min.x <= p.x && p.x <= max.x && min.y <= p.y && p.y <= max.y {
+                return Some(t);
+            }
+        }
+
+        None
+    }
+
+    fn intersect_line_segment(&self, a: &Vec3, b: &Vec3) -> bool {
+        let r = Ray::new(*a, (b - a).norm());
+
+        if let Some(t) = self.intersect(&r) {
+            if t <= (b - a).mag() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn overlaps_triangle(&self, t: &Triangle) -> bool {
-        self.overlaps(&Self::enclose_triangle(t))
+        let b = Self::enclose(&vec![t.a, t.b, t.c]);
+        self.overlaps(&b)
+
+        // let Triangle { a, b, c } = t;
+        // if self.contains(a) || self.contains(b) || self.contains(c) {
+        //     return true;
+        // }
+
+        // self.intersect_line_segment(a, b)
+        //     || self.intersect_line_segment(a, c)
+        //     || self.intersect_line_segment(b, c)
     }
 
     pub fn center(&self) -> Vec3 {
-        (self.max + self.min) / 2.
+        (self.min + self.max) / 2.
     }
+
+    pub fn octant(&self, i: usize) -> Self {
+        let BoundingBox { min, max } = self;
+        let center = self.center();
+        match i {
+            0 => Self::new(min.clone(), center),
+            1 => Self::new(
+                Vec3::new(min.x, min.y, center.z),
+                Vec3::new(center.x, center.y, max.z),
+            ),
+            2 => Self::new(
+                Vec3::new(min.x, center.y, min.z),
+                Vec3::new(center.x, max.y, center.z),
+            ),
+            3 => Self::new(
+                Vec3::new(min.x, center.y, center.z),
+                Vec3::new(center.x, max.y, max.z),
+            ),
+            4 => Self::new(
+                Vec3::new(center.x, min.y, min.z),
+                Vec3::new(max.x, center.y, center.z),
+            ),
+            5 => Self::new(
+                Vec3::new(center.x, min.y, center.z),
+                Vec3::new(max.x, center.y, max.z),
+            ),
+            6 => Self::new(
+                Vec3::new(center.x, center.y, min.z),
+                Vec3::new(max.x, max.y, center.z),
+            ),
+            7 => Self::new(center, max.clone()),
+            _ => panic!("octant index out of bounds"),
+        }
+    }
+
+    pub fn octants(&self) -> [Self; 8] {
+        [
+            self.octant(0),
+            self.octant(1),
+            self.octant(2),
+            self.octant(3),
+            self.octant(4),
+            self.octant(5),
+            self.octant(6),
+            self.octant(7),
+        ]
+    }
+}
+
+#[test]
+fn test_octants() {
+    let b = BoundingBox::new(Vec3::new(-1., -1., -1.), Vec3::new(1., 1., 1.));
+    assert_eq!(
+        b.octants(),
+        [
+            BoundingBox::new(Vec3::new(-1., -1., -1.), Vec3::new(0., 0., 0.)),
+            BoundingBox::new(Vec3::new(-1., -1., 0.), Vec3::new(0., 0., 1.)),
+            BoundingBox::new(Vec3::new(-1., 0., -1.), Vec3::new(0., 1., 0.)),
+            BoundingBox::new(Vec3::new(-1., 0., 0.), Vec3::new(0., 1., 1.)),
+            BoundingBox::new(Vec3::new(0., -1., -1.), Vec3::new(1., 0., 0.)),
+            BoundingBox::new(Vec3::new(0., -1., 0.), Vec3::new(1., 0., 1.)),
+            BoundingBox::new(Vec3::new(0., 0., -1.), Vec3::new(1., 1., 0.)),
+            BoundingBox::new(Vec3::new(0., 0., 0.), Vec3::new(1., 1., 1.)),
+        ]
+    );
 }
 
 #[derive(Debug, Clone)]
 pub struct Octree {
-    nodes: Vec<Node>,
-    bounding_box: BoundingBox,
+    pub nodes: Vec<Node>,
+    pub bounding_box: BoundingBox,
 }
 
 #[derive(Debug, Clone)]
-enum Node {
-    Internal { children: Vec<usize> },
-    Leaf { triangles: Vec<usize> }
+pub enum Node {
+    Parent { children: [Option<usize>; 8] },
+    Leaf { triangles: Vec<(usize, Triangle)> },
 }
 
 impl Octree {
     const MAX_DEPTH: usize = 10;
-    const MAX_TRIS_IN_NODE: usize = 9;
+    const SMALL_NODE: usize = 9;
 
-    pub fn new(triangles: Vec<Triangle>) -> Self {
+    pub fn build(mesh: &Mesh) -> Self {
         let mut nodes: Vec<Node> = Vec::new();
-
+        Self::_build(
+            mesh,
+            mesh.bounding_box,
+            mesh.triangles().enumerate().collect(),
+            &mut nodes,
+            1,
+        );
         Self {
             nodes,
-            bounding_box: BoundingBox::enclose_triangles(&triangles)
+            bounding_box: mesh.bounding_box,
         }
     }
 
-    fn build(triangles: &Vec<Triangle>, nodes: &mut Vec<Node>, depth: usize) {
+    fn _build(
+        mesh: &Mesh,
+        bounding_box: BoundingBox,
+        triangles: Vec<(usize, Triangle)>,
+        nodes: &mut Vec<Node>,
+        depth: usize,
+    ) -> Option<usize> {
+        if triangles.len() == 0 {
+            return None;
+        }
 
+        if triangles.len() <= Self::SMALL_NODE || depth >= Self::MAX_DEPTH {
+            let i_new = Self::create_node(nodes, Node::Leaf {
+                triangles
+            });
+            return Some(i_new);
+        }
+
+        let octants = bounding_box.octants();
+        let mut octant_triangles: [Vec<(usize, Triangle)>; 8] = [
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ];
+
+        for (id, t) in triangles {
+            for (i, octant) in octants.iter().enumerate() {
+                if octant.overlaps_triangle(&t) {
+                    octant_triangles[i].push((id, t));
+                }
+            }
+        }
+
+        let mut children: [Option<usize>; 8] = [None; 8];
+        let i_new = Self::create_node(nodes, Node::Parent { children });
+
+        for i in 0..8 {
+            children[i] = Self::_build(
+                mesh,
+                octants[i],
+                octant_triangles[i].clone(),
+                nodes,
+                depth + 1,
+            );
+        }
+
+        nodes[i_new] = Node::Parent { children };
+
+        Some(i_new)
+    }
+
+    pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
+        if self.nodes.is_empty() {
+            None
+        } else {
+            let mut octant_search_order = [0, 1, 2, 3, 4, 5, 6, 7];
+            let octants = self.bounding_box.octants();
+            let dist_to_ray = |octant: &BoundingBox| {
+                (octant.center() - ray.pos).mag()
+            };
+            for i in 1..octant_search_order.len() {
+                let mut j = i;
+                while j > 0 && dist_to_ray(&octants[octant_search_order[j-1]]) > dist_to_ray(&octants[octant_search_order[j]]) {
+                    octant_search_order.swap(j, j-1);
+                    j -= 1;
+                }
+            }
+            self._intersect_recurse(&self.nodes[0], self.bounding_box, &octant_search_order, ray)
+        }
+    }
+
+    fn _intersect_recurse(
+        &self,
+        node: &Node,
+        bounding_box: BoundingBox,
+        octant_search_order: &[usize; 8],
+        ray: &Ray,
+    ) -> Option<Hit> {
+        match node {
+            Node::Parent { children } => {
+                let octants = bounding_box.octants();
+                for i in octant_search_order {
+                    let i = *i;
+                    let octant = octants[i];
+                    if let Some(n) = children[i] {
+                        if octant.intersect(ray).is_some() {
+                            if let Some(hit) = self._intersect_recurse(
+                                &self.nodes[n],
+                                octant,
+                                octant_search_order,
+                                ray
+                            ) {
+                                return Some(hit)
+                            }
+                        }
+                    }
+                }
+                None
+            },
+            Node::Leaf { triangles } => {
+                let mut nearest_hit: Option<Hit> = None;
+                for (_, tri) in triangles {
+                    if let Some(hit) = tri.intersect(ray) {
+                        match nearest_hit {
+                            Some(nh) => {
+                                if hit.t < nh.t {
+                                    nearest_hit = Some(hit);
+                                }
+                            },
+                            None => {
+                                nearest_hit = Some(hit);
+                            }
+                        }
+                    }
+                }
+                nearest_hit
+            },
+        }
+    }
+
+    fn create_node(nodes: &mut Vec<Node>, n: Node) -> usize {
+        nodes.push(n);
+        nodes.len() - 1
     }
 }

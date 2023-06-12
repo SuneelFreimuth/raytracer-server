@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use std::{fs::File, io};
 
-mod octree;
 mod ppm;
 mod util;
 mod vec3;
@@ -17,6 +16,8 @@ use rayon::prelude::*;
 use vec3::*;
 use body::{Body, Plane, Mesh, Sphere, Hit};
 use util::map;
+
+use crate::body::Node;
 
 const WIDTH: usize = 480;
 const HEIGHT: usize = 360;
@@ -321,25 +322,36 @@ fn main() -> io::Result<()> {
     let bright_surf = BRDF::Diffuse(Vec3::repeat(0.9));
     let shiny_surf = BRDF::Specular(Vec3::repeat(0.999));
 
-    // let f = BufReader::new(File::open("assets/crewmate.obj")?);
-    // let mut mesh = Mesh::load(f).expect("could not open model");
-    // mesh.scale(0.3);
-    // mesh.translate(&Vec3::new(30., -70., 65.));
-    // mesh.rotate_y(0.5);
-
-    let f = BufReader::new(File::open("assets/chair.obj")?);
+    let f = BufReader::new(File::open("assets/crewmate.obj")?);
     let mut mesh = Mesh::load(f).expect("could not open model");
-    mesh.scale(25.);
-    mesh.translate(&Vec3::new(30., 20.01, 65.));
+    mesh.scale(0.3);
+    mesh.translate(&Vec3::new(30., -70., 65.));
     mesh.rotate_y(0.5);
+    mesh.accelerate();
 
-    println!(
-        "Mesh has {} vertices, {} normals, and {} indices.",
-        mesh.vertices.len(),
-        mesh.normals.len(),
-        mesh.indices.len()
-    );
-    println!("mesh bounding box: {:?}", mesh.bounding_box);
+    // let f = BufReader::new(File::open("assets/chair.obj")?);
+    // let mut mesh = Mesh::load(f).expect("could not open model");
+    // mesh.scale(25.);
+    // mesh.translate(&Vec3::new(30., 20.01, 65.));
+    // mesh.rotate_y(0.5);
+    // mesh.accelerate();
+
+    if let Some(octree) = &mesh.octree {
+        println!("octree has {} nodes.", octree.nodes.len());
+        // println!("Nodes:");
+        // for (i, node) in octree.nodes.iter().enumerate() {
+        //     println!("{i}: {}", match node {
+        //         Node::Parent { children } => {
+        //             format!("internal {children:?}")
+        //         },
+        //         Node::Leaf { triangles } => {
+        //             format!("leaf with {} triangles", triangles.len())
+        //         }
+        //     });
+        // }
+    }
+    println!("Mesh has {} triangles.", mesh.num_triangles());
+    println!("Mesh bounding box: {:?}", mesh.bounding_box);
 
     let scene = Scene {
         objects: vec![
