@@ -338,6 +338,7 @@ fn main() -> io::Result<()> {
 
     if let Some(octree) = &mesh.octree {
         println!("octree has {} nodes.", octree.nodes.len());
+        println!("octree depth is {}.", octree.depth());
         // println!("Nodes:");
         // for (i, node) in octree.nodes.iter().enumerate() {
         //     println!("{i}: {}", match node {

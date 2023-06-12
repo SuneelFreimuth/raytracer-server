@@ -100,9 +100,7 @@ impl Body {
                     None
                 }
             }
-            Self::Mesh(mesh) => {
-                mesh.intersect(ray)
-            }
+            Self::Mesh(mesh) => mesh.intersect(ray),
         }
     }
 }
@@ -452,12 +450,12 @@ impl BoundingBox {
     }
 
     fn _overlaps(&self, b: &Self) -> bool {
-        self.min.x <= b.max.x &&
-        self.max.x >= b.min.x &&
-        self.min.y <= b.max.y &&
-        self.max.y >= b.min.y &&
-        self.min.z <= b.max.z &&
-        self.max.z >= b.min.z
+        self.min.x <= b.max.x
+            && self.max.x >= b.min.x
+            && self.min.y <= b.max.y
+            && self.max.y >= b.min.y
+            && self.min.z <= b.max.z
+            && self.max.z >= b.min.z
     }
 
     pub fn overlaps(&self, b: &Self) -> bool {
@@ -672,9 +670,7 @@ impl Octree {
         }
 
         if triangles.len() <= Self::SMALL_NODE || depth >= Self::MAX_DEPTH {
-            let i_new = Self::create_node(nodes, Node::Leaf {
-                triangles
-            });
+            let i_new = Self::create_node(nodes, Node::Leaf { triangles });
             return Some(i_new);
         }
 
@@ -716,23 +712,30 @@ impl Octree {
         Some(i_new)
     }
 
+    pub fn depth(&self) -> i64 {
+        self._depth_recurse(0)
+    }
+
+    pub fn _depth_recurse(&self, i: usize) -> i64 {
+        if let Node::Parent { children } = self.nodes[i] {
+            1 + children
+                .iter()
+                .map(|c| match c {
+                    Some(n) => self._depth_recurse(*n),
+                    None => -1,
+                })
+                .max()
+                .unwrap()
+        } else {
+            0
+        }
+    }
+
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         if self.nodes.is_empty() {
             None
         } else {
-            let mut octant_search_order = [0, 1, 2, 3, 4, 5, 6, 7];
-            let octants = self.bounding_box.octants();
-            let dist_to_ray = |octant: &BoundingBox| {
-                (octant.center() - ray.pos).mag()
-            };
-            for i in 1..octant_search_order.len() {
-                let mut j = i;
-                while j > 0 && dist_to_ray(&octants[octant_search_order[j-1]]) > dist_to_ray(&octants[octant_search_order[j]]) {
-                    octant_search_order.swap(j, j-1);
-                    j -= 1;
-                }
-            }
-            self._intersect_recurse(&self.nodes[0], self.bounding_box, &octant_search_order, ray)
+            self._intersect_recurse(&self.nodes[0], self.bounding_box, ray)
         }
     }
 
@@ -740,30 +743,41 @@ impl Octree {
         &self,
         node: &Node,
         bounding_box: BoundingBox,
-        octant_search_order: &[usize; 8],
         ray: &Ray,
     ) -> Option<Hit> {
         match node {
             Node::Parent { children } => {
+                let mut octant_search_order = [0, 1, 2, 3, 4, 5, 6, 7];
+                let octants = self.bounding_box.octants();
+                let dist_to_ray = |octant: &BoundingBox| (octant.center() - ray.pos).mag();
+                for i in 1..octant_search_order.len() {
+                    let mut j = i;
+                    while j > 0
+                        && dist_to_ray(&octants[octant_search_order[j - 1]])
+                            > dist_to_ray(&octants[octant_search_order[j]])
+                    {
+                        octant_search_order.swap(j, j - 1);
+                        j -= 1;
+                    }
+                }
+
                 let octants = bounding_box.octants();
                 for i in octant_search_order {
-                    let i = *i;
                     let octant = octants[i];
                     if let Some(n) = children[i] {
                         if octant.intersect(ray).is_some() {
                             if let Some(hit) = self._intersect_recurse(
                                 &self.nodes[n],
                                 octant,
-                                octant_search_order,
-                                ray
+                                ray,
                             ) {
-                                return Some(hit)
+                                return Some(hit);
                             }
                         }
                     }
                 }
                 None
-            },
+            }
             Node::Leaf { triangles } => {
                 let mut nearest_hit: Option<Hit> = None;
                 for (_, tri) in triangles {
@@ -773,7 +787,7 @@ impl Octree {
                                 if hit.t < nh.t {
                                     nearest_hit = Some(hit);
                                 }
-                            },
+                            }
                             None => {
                                 nearest_hit = Some(hit);
                             }
@@ -781,7 +795,7 @@ impl Octree {
                     }
                 }
                 nearest_hit
-            },
+            }
         }
     }
 
