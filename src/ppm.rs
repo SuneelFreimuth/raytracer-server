@@ -21,16 +21,16 @@ impl Image {
         }
     }
 
-    pub fn dump<T: Write>(&self, f: &mut T) -> io::Result<()> {
-        writeln!(f, "P3")?;
-        writeln!(f, "{} {}", self.width, self.height)?;
-        writeln!(f, "{}", self.maxval)?;
+    pub fn dump<W: Write>(&self, w: &mut W) -> io::Result<()> {
+        writeln!(w, "P3")?;
+        writeln!(w, "{} {}", self.width, self.height)?;
+        writeln!(w, "{}", self.maxval)?;
         for r in 0..self.height {
             for c in 0..self.width {
                 let Vec3 { x, y, z } = self.pixels[self.width * r + c];
-                write!(f, "{} {} {} ", x as u64, y as u64, z as u64)?;
+                write!(w, "{} {} {} ", x as u64, y as u64, z as u64)?;
             }
-            write!(f, "\n")?;
+            write!(w, "\n")?;
         }
         Ok(())
     }

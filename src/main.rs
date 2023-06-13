@@ -12,6 +12,7 @@ mod vec3;
 mod body;
 
 use rand::random;
+use rand::seq::index::sample;
 use rayon::prelude::*;
 use pixels::{Error, Pixels, SurfaceTexture};
 use winit::{
@@ -112,6 +113,7 @@ impl BRDF {
 }
 
 pub struct Scene {
+    camera: Ray,
     objects: Vec<Object>,
 }
 
@@ -131,224 +133,6 @@ fn concat<T: Clone>(a: Vec<T>, b: Vec<T>) -> Vec<T> {
 }
 
 impl Scene {
-    pub fn render(&self, img: &mut ppm::Image, camera: &Ray) {
-        let width = img.width as usize;
-        let height = img.height as usize;
-        let w = width as f64;
-        let h = height as f64;
-        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
-        let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = unsafe { NUM_SAMPLES / 4 };
-
-        let completion = Arc::new(Mutex::new(0u64));
-        let pixels = (0..height)
-            .into_par_iter()
-            .map(move |y| {
-                let y = height - y - 1;
-                let mut row = vec![Vec3::zero(); width];
-                for x in 0..width {
-                    for sy in 0..2 {
-                        for sx in 0..2 {
-                            let mut rad = Vec3::zero();
-                            for _ in 0..num_samples {
-                                let r1 = 2. * random::<f64>();
-                                let dx = if r1 < 1. {
-                                    r1.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r1).sqrt()
-                                };
-
-                                let r2 = 2. * random::<f64>();
-                                let dy = if r2 < 1. {
-                                    r2.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r2).sqrt()
-                                };
-
-                                let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                                    + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                                    + camera.dir;
-
-                                rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                                    * (1. / num_samples as f64);
-                            }
-                            row[x] += rad.clamp(0., 1.) * 0.25;
-                        }
-                    }
-                }
-                let mut completion = completion.lock().unwrap();
-                *completion += 1;
-                unsafe {
-                    print!(
-                        "\rRendering at {NUM_SAMPLES} spp ({:.1}%)",
-                        *completion as f64 / h * 100.
-                    );
-                }
-                row
-            })
-            .reduce(|| Vec::new(), |agg, x| concat(agg, x));
-        print!("\n");
-
-        for y in 0..img.height {
-            for x in 0..img.width {
-                let i = y * img.width + x;
-                img.set(y, x, gamma_correct(&pixels[i]));
-            }
-        }
-    }
-
-    pub fn render_to_buf(&self, buf: &mut [u8], width: usize, height: usize, camera: &Ray) {
-        let w = width as f64;
-        let h = height as f64;
-        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
-        let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = unsafe { NUM_SAMPLES / 4 };
-
-        let pixels = (0..height)
-            .into_par_iter()
-            .map(move |y| {
-                let y = height - y - 1;
-                let mut row = vec![Vec3::zero(); width];
-                for x in 0..width {
-                    for sy in 0..2 {
-                        for sx in 0..2 {
-                            let mut rad = Vec3::zero();
-                            for _ in 0..num_samples {
-                                let r1 = 2. * random::<f64>();
-                                let dx = if r1 < 1. {
-                                    r1.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r1).sqrt()
-                                };
-
-                                let r2 = 2. * random::<f64>();
-                                let dy = if r2 < 1. {
-                                    r2.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r2).sqrt()
-                                };
-
-                                let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                                    + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                                    + camera.dir;
-
-                                rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                                    * (1. / num_samples as f64);
-                            }
-                            row[x] += rad.clamp(0., 1.) * 0.25;
-                        }
-                    }
-                }
-                row
-            })
-            .reduce(|| Vec::new(), |agg, x| concat(agg, x));
-
-        
-        for y in 0..height {
-            for x in 0..width {
-                let i = y * width + x;
-                let Vec3 { x: r, y: g, z: b } = gamma_correct(&pixels[i]);
-                buf[4 * i] = r as u8;
-                buf[4 * i + 1] = g as u8;
-                buf[4 * i + 2] = b as u8;
-                buf[4 * i + 3] = 255;
-            }
-        }
-    }
-
-    pub fn render_row(&self, buf: &mut [u8], y: usize, width: usize, height: usize, camera: &Ray) {
-        let w = width as f64;
-        let h = height as f64;
-        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
-        let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = unsafe { NUM_SAMPLES / 4 };
-
-        for x in 0..width {
-            let mut pixel = Vec3::zero();
-            for sy in 0..2 {
-                for sx in 0..2 {
-                    let mut rad = Vec3::zero();
-                    for _ in 0..num_samples {
-                        let r1 = 2. * random::<f64>();
-                        let dx = if r1 < 1. {
-                            r1.sqrt() - 1.
-                        } else {
-                            1. - (2. - r1).sqrt()
-                        };
-
-                        let r2 = 2. * random::<f64>();
-                        let dy = if r2 < 1. {
-                            r2.sqrt() - 1.
-                        } else {
-                            1. - (2. - r2).sqrt()
-                        };
-
-                        let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                            + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                            + camera.dir;
-
-                        rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                            * (1. / num_samples as f64);
-                    }
-                    pixel += rad.clamp(0., 1.) * 0.25;
-                }
-            }
-            pixel = gamma_correct(&pixel);
-            buf[4 * x] = pixel.x as u8;
-            buf[4 * x + 1] = pixel.y as u8;
-            buf[4 * x + 2] = pixel.z as u8;
-            buf[4 * x + 3] = 255;
-        }
-    }
-
-    pub fn render_row_sync(&self, buf: &RwLock<Vec<u8>>, y: usize, width: usize, height: usize, camera: &Ray) {
-        let w = width as f64;
-        let h = height as f64;
-        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
-        let cy = cx.cross(&camera.dir).norm() * 0.5135;
-        let num_samples = unsafe { NUM_SAMPLES / 4 };
-
-        for x in 0..width {
-            let mut pixel = Vec3::zero();
-            for sy in 0..2 {
-                for sx in 0..2 {
-                    let y = HEIGHT - y - 1;
-                    let mut rad = Vec3::zero();
-                    for _ in 0..num_samples {
-                        let r1 = 2. * random::<f64>();
-                        let dx = if r1 < 1. {
-                            r1.sqrt() - 1.
-                        } else {
-                            1. - (2. - r1).sqrt()
-                        };
-
-                        let r2 = 2. * random::<f64>();
-                        let dy = if r2 < 1. {
-                            r2.sqrt() - 1.
-                        } else {
-                            1. - (2. - r2).sqrt()
-                        };
-
-                        let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                            + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                            + camera.dir;
-
-                        rad += self.received_radiance(&Ray::new(camera.pos, d.norm()))
-                            * (1. / num_samples as f64);
-                    }
-                    pixel += rad.clamp(0., 1.) * 0.25;
-                }
-            }
-            pixel = gamma_correct(&pixel);
-            let mut buf = buf.write().unwrap();
-            let row = &mut buf[4 * WIDTH * y..4 * WIDTH * (y + 1)];
-            row[4 * x] = pixel.x as u8;
-            row[4 * x + 1] = pixel.y as u8;
-            row[4 * x + 2] = pixel.z as u8;
-            row[4 * x + 3] = 255;
-        }
-    }
-
     fn received_radiance(&self, r: &Ray) -> Vec3 {
         if let Some(hit) = self.trace_ray(r) {
             let obj = &self.objects[hit.id as usize];
@@ -467,16 +251,205 @@ impl Scene {
     }
 }
 
-fn main() -> io::Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        unsafe {
-            NUM_SAMPLES = args[1]
-                .parse::<usize>()
-                .expect("if provided, first argument must be an integer.");
+trait Renderer {
+    fn render(&self, scene: &Scene);
+}
+
+struct PPMRenderer {
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize,
+    file: File
+}
+
+impl Renderer for PPMRenderer {
+    fn render(&self, scene: &Scene) {
+        let PPMRenderer { width, height, samples_per_pixel, file } = self;
+        let w = *width as f64;
+        let h = *height as f64;
+        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
+        let cy = cx.cross(&scene.camera.dir).norm() * 0.5135;
+        let num_samples = samples_per_pixel / 4;
+
+        let img = ppm::Image::new(self.width, self.height, 255);
+        let img_guarded = Arc::new(Mutex::new(img));
+        let img_guard_clone = Arc::clone(&img_guarded);
+        let completion = Arc::new(Mutex::new(0u64));
+
+        (0..*height)
+            .into_par_iter()
+            .for_each(move |y| {
+                let img_guarded = &img_guard_clone;
+                let y = height - y - 1;
+                for x in 0..*width {
+                    let mut pixel = Vec3::zero();
+                    for sy in 0..2 {
+                        for sx in 0..2 {
+                            let mut rad = Vec3::zero();
+                            for _ in 0..num_samples {
+                                let r1 = 2. * random::<f64>();
+                                let dx = if r1 < 1. {
+                                    r1.sqrt() - 1.
+                                } else {
+                                    1. - (2. - r1).sqrt()
+                                };
+
+                                let r2 = 2. * random::<f64>();
+                                let dy = if r2 < 1. {
+                                    r2.sqrt() - 1.
+                                } else {
+                                    1. - (2. - r2).sqrt()
+                                };
+
+                                let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                    + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                    + scene.camera.dir;
+
+                                rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                                    * (1. / num_samples as f64);
+                            }
+                            pixel += rad.clamp(0., 1.) * 0.25;
+                        }
+                    }
+                    let mut img = img_guarded.lock().unwrap();
+                    img.set(height - y - 1, x, gamma_correct(&pixel));
+                }
+
+                let mut completion = completion.lock().unwrap();
+                *completion += 1;
+                print!(
+                    "\rRendering at {samples_per_pixel} spp ({:.1}%)",
+                    *completion as f64 / h * 100.
+                );
+            });
+        print!("\n");
+
+        let img = img_guarded.lock().unwrap();
+        img.dump(&mut BufWriter::new(file)).expect("failed to dump to file");
+        
+        // for y in 0..img.height {
+        //     for x in 0..img.width {
+        //         let i = y * img.width + x;
+        //         img.set(y, x, gamma_correct(&pixels[i]));
+        //     }
+        // }
+    }
+}
+
+struct WindowRenderer {
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize
+}
+
+impl WindowRenderer {
+    fn render_row_sync(&self, scene: &Scene, buf: &RwLock<Vec<u8>>, y: usize) {
+        let WindowRenderer { width, height, samples_per_pixel } = self;
+        let w = *width as f64;
+        let h = *height as f64;
+        let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
+        let cy = cx.cross(&scene.camera.dir).norm() * 0.5135;
+        let num_samples = samples_per_pixel / 4;
+
+        for x in 0..*width {
+            let mut pixel = Vec3::zero();
+            for sy in 0..2 {
+                for sx in 0..2 {
+                    let y = HEIGHT - y - 1;
+                    let mut rad = Vec3::zero();
+                    for _ in 0..num_samples {
+                        let r1 = 2. * random::<f64>();
+                        let dx = if r1 < 1. {
+                            r1.sqrt() - 1.
+                        } else {
+                            1. - (2. - r1).sqrt()
+                        };
+
+                        let r2 = 2. * random::<f64>();
+                        let dy = if r2 < 1. {
+                            r2.sqrt() - 1.
+                        } else {
+                            1. - (2. - r2).sqrt()
+                        };
+
+                        let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                            + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                            + scene.camera.dir;
+
+                        rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                            * (1. / num_samples as f64);
+                    }
+                    pixel += rad.clamp(0., 1.) * 0.25;
+                }
+            }
+            let mut buf = buf.write().unwrap();
+            let row = &mut buf[4 * WIDTH * y..4 * WIDTH * (y + 1)];
+            pixel = gamma_correct(&pixel);
+            row[4 * x] = pixel.x as u8;
+            row[4 * x + 1] = pixel.y as u8;
+            row[4 * x + 2] = pixel.z as u8;
+            row[4 * x + 3] = 255;
         }
     }
 
+}
+
+impl Renderer for WindowRenderer {
+    fn render(&self, scene: &Scene) {
+        let event_loop = EventLoop::new();
+        let mut input = WinitInputHelper::new();
+        let window = {
+            let size = LogicalSize::new(480., 360.);
+            WindowBuilder::new()
+                .with_title("Raytracer")
+                .with_inner_size(size)
+                .with_min_inner_size(size)
+                .build(&event_loop)
+                .unwrap()
+        };
+
+        let window_size = window.inner_size();
+        let mut pixels = {
+            let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
+            Pixels::new(self.width as u32, self.height as u32, surface_texture).expect("could not create pixel buffer")
+        };
+
+        let buf = Arc::new(RwLock::new(vec![0u8; 4 * self.width * self.height]));
+        let buf_ref = Arc::clone(&buf);
+        thread::scope(|s| {
+            s.spawn(move || {
+                let now = Instant::now();
+                (0..self.height)
+                    .into_par_iter()
+                    .for_each(|y| {
+                        self.render_row_sync(&scene, &buf_ref, y);
+                    });
+                let elapsed = now.elapsed();
+                println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
+            });
+
+            event_loop.run(move |event, _, control_flow| {
+                if let Event::RedrawRequested(_) = event {
+                    let f = pixels.frame_mut();
+                    f.copy_from_slice(&*buf.read().unwrap());
+                    if let Err(err) = pixels.render() {
+                        eprintln!("{:?}", err);
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
+
+                if input.update(&event) {
+                    if input.close_requested() {
+                        *control_flow = ControlFlow::Exit;
+                    }
+                    window.request_redraw();
+                }
+            });
+        });
+    }
+}
+
+fn main() -> io::Result<()> {
     let left_wall = BRDF::Diffuse(Vec3::new(0.75, 0.25, 0.25));
     let right_wall = BRDF::Diffuse(Vec3::new(0.25, 0.25, 0.75));
     let other_wall = BRDF::Diffuse(Vec3::new(0.75, 0.75, 0.75));
@@ -487,7 +460,7 @@ fn main() -> io::Result<()> {
     let f = BufReader::new(File::open("assets/crewmate.obj")?);
     let mut mesh = Mesh::load(f).expect("could not open model");
     mesh.scale(0.3);
-    mesh.translate(&Vec3::new(30., -70., 65.));
+    mesh.translate(&Vec3::new(30., -70., 75.));
     mesh.rotate_y(0.5);
     mesh.accelerate();
 
@@ -498,14 +471,11 @@ fn main() -> io::Result<()> {
     // mesh.rotate_y(0.5);
     // mesh.accelerate();
 
-    if let Some(octree) = &mesh.octree {
-        println!("octree has {} nodes.", octree.nodes.len());
-        println!("octree depth is {}.", octree.depth());
-    }
-    println!("Mesh has {} triangles.", mesh.num_triangles());
-    println!("Mesh bounding box: {:?}", mesh.bounding_box);
-
     let scene = Scene {
+        camera: Ray {
+            pos: Vec3::new(50., 52., 295.6),
+            dir: Vec3::new(0., -0.042612, -1.).norm(),
+        },
         objects: vec![
             // Left
             Object {
@@ -557,17 +527,13 @@ fn main() -> io::Result<()> {
                 brdf: bright_surf,
                 emitted: Vec3::zero(),
                 body: Body::Mesh(mesh),
-                // body: Body::Sphere(Sphere {
-                //     pos: Vec3::new(27., 16.5, 47.),
-                //     r: 16.5,
-                // }),
             },
             // Ball 2
             Object {
                 brdf: shiny_surf,
                 emitted: Vec3::zero(),
                 body: Body::Sphere(Sphere {
-                    pos: Vec3::new(73., 16.5, 78.),
+                    pos: Vec3::new(73., 16.5, 68.),
                     r: 16.5,
                 }),
             },
@@ -583,70 +549,27 @@ fn main() -> io::Result<()> {
         ],
     };
 
-    let mut img = ppm::Image::new(WIDTH, HEIGHT, MAXVAL);
-    let camera = Ray {
-        pos: Vec3::new(50., 52., 295.6),
-        dir: Vec3::new(0., -0.042612, -1.).norm(),
+    let args: Vec<String> = std::env::args().collect();
+    // let renderer = PPMRenderer {
+    //     width: WIDTH,
+    //     height: HEIGHT,
+    //     samples_per_pixel: if let Some(arg) = args.get(1) {
+    //         arg.parse().unwrap()
+    //     } else {
+    //         4
+    //     },
+    //     file: File::create("image.ppm").expect("could not open image file for writing")
+    // };
+    let renderer = WindowRenderer {
+        width: WIDTH,
+        height: HEIGHT,
+        samples_per_pixel: if let Some(arg) = args.get(1) {
+            arg.parse().unwrap()
+        } else {
+            4
+        },
     };
+    renderer.render(&scene);
 
-    // let f = File::create("image.ppm")?;
-    // let mut w = BufWriter::new(f);
-    // let now = Instant::now();
-    // // img.dump(&mut w)?;
-    // let elapsed = now.elapsed();
-    // println!("Dumped to file in {:.5} seconds.", elapsed.as_secs_f64());
-
-    let event_loop = EventLoop::new();
-    let mut input = WinitInputHelper::new();
-    let window = {
-        let size = LogicalSize::new(480., 360.);
-        WindowBuilder::new()
-            .with_title("Raytracer")
-            .with_inner_size(size)
-            .with_min_inner_size(size)
-            .build(&event_loop)
-            .unwrap()
-    };
-
-    let window_size = window.inner_size();
-    let mut pixels = {
-        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-        Pixels::new(WIDTH as u32, HEIGHT as u32, surface_texture).expect("could not create pixel buffer")
-    };
-
-    let buf = Arc::new(RwLock::new(vec![0u8; 4 * WIDTH * HEIGHT]));
-    let buf_ref = Arc::clone(&buf);
-    spawn(move || {
-        let now = Instant::now();
-        (0..HEIGHT)
-            .into_par_iter()
-            .for_each(|y| {
-                scene.render_row_sync(&buf_ref, y, WIDTH, HEIGHT, &camera);
-            });
-        let elapsed = now.elapsed();
-        println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
-        // for y in 0..HEIGHT {
-        //     let mut buf = buf_ref.write().unwrap();
-        //     scene.render_row(&mut buf[4 * WIDTH * y..4 * WIDTH * (y + 1)], HEIGHT - y - 1, WIDTH, HEIGHT, &camera);
-        // }
-        println!("Done!");
-    });
-
-    event_loop.run(move |event, _, control_flow| {
-        if let Event::RedrawRequested(_) = event {
-            let f = pixels.frame_mut();
-            f.copy_from_slice(&*buf.read().unwrap());
-            if let Err(err) = pixels.render() {
-                eprintln!("{:?}", err);
-                *control_flow = ControlFlow::Exit;
-            }
-        }
-
-        if input.update(&event) {
-            if input.close_requested() {
-                *control_flow = ControlFlow::Exit;
-            }
-            window.request_redraw();
-        }
-    });
+    Ok(())
 }
