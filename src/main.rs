@@ -6,26 +6,26 @@ use std::thread::{self, spawn};
 use std::time::Instant;
 use std::{fs::File, io};
 
+mod body;
 mod ppm;
 mod util;
 mod vec3;
-mod body;
 
+use pixels::{Error, Pixels, SurfaceTexture};
 use rand::random;
 use rand::seq::index::sample;
 use rayon::prelude::*;
-use pixels::{Error, Pixels, SurfaceTexture};
 use winit::{
     dpi::LogicalSize,
-    event_loop::{ControlFlow, EventLoop},
     event::Event,
-    window::WindowBuilder
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
 };
 use winit_input_helper::WinitInputHelper;
 
-use vec3::*;
-use body::{Body, Plane, Mesh, Sphere, Hit};
+use body::{Body, Hit, Mesh, Plane, Sphere};
 use util::map;
+use vec3::*;
 
 use crate::body::Node;
 use crate::ppm::Image;
@@ -69,6 +69,13 @@ pub fn create_local_coord(n: &Vec3) -> (Vec3, Vec3, Vec3) {
 pub enum BRDF {
     Diffuse(Vec3),
     Specular(Vec3),
+    Phong {
+        kd: f64,
+        ks: f64,
+        power: i32,
+        color_d: Vec3,
+        color_s: Vec3
+    },
 }
 
 impl BRDF {
@@ -81,6 +88,11 @@ impl BRDF {
                 } else {
                     Vec3::zero()
                 }
+            }
+            Self::Phong { ks, kd, power, color_d, color_s } => {
+                let reflection = i.flip_across(n);
+                color_d * *kd * FRAC_1_PI
+                    + color_s * *ks * (power + 2) as f64 / (2. * PI) * o.dot(&reflection).max(0.).powi(*power)
             }
         }
     }
@@ -101,13 +113,34 @@ impl BRDF {
                 (i, n.dot(&i) * FRAC_1_PI)
             }
             Self::Specular(_) => (o.flip_across(n), 1.0),
-        }
-    }
-
-    pub fn is_specular(&self) -> bool {
-        match self {
-            Self::Specular(_) => true,
-            _ => false,
+            Self::Phong { kd, power, .. } => {
+                let p = *power as f64;
+                let u = random::<f64>();
+                if u < *kd {
+                    // Diffuse sample
+                    let xi1 = random::<f64>();
+                    let xi2 = random::<f64>();
+                    let i = Vec3 {
+                        x: (1. - xi1).sqrt() * (2. * PI * xi2).cos(),
+                        y: (1. - xi1).sqrt() * (2. * PI * xi2).sin(),
+                        z: xi1.sqrt()
+                    };
+                    (i, i.z * FRAC_1_PI)
+                } else {
+                    // Specular sample
+                    let xi1 = random::<f64>();
+                    let xi2 = random::<f64>();
+                    let i = Vec3 {
+                        x: (1. - xi1.powf(2. / (p + 1.))).sqrt() * (2. * PI * xi2).cos(),
+                        y: (1. - xi1.powf(2. / (p + 1.))).sqrt() * (2. * PI * xi2).sin(),
+                        z: xi1.powf(1. / (p + 1.)),
+                    };
+                    (
+                        i,
+                        (p + 1.) / (2. * PI) * i.z.powi(*power)
+                    )
+                }
+            }
         }
     }
 }
@@ -151,7 +184,7 @@ impl Scene {
             SURVIVAL_PROBABILITY
         };
 
-        if obj.brdf.is_specular() {
+        if let BRDF::Specular(_) = obj.brdf {
             let mut rad = Vec3::zero();
 
             if random::<f64>() < p {
@@ -259,12 +292,17 @@ struct PPMRenderer {
     width: usize,
     height: usize,
     samples_per_pixel: usize,
-    file: File
+    file: File,
 }
 
 impl Renderer for PPMRenderer {
     fn render(&self, scene: &Scene) {
-        let PPMRenderer { width, height, samples_per_pixel, file } = self;
+        let PPMRenderer {
+            width,
+            height,
+            samples_per_pixel,
+            file,
+        } = self;
         let w = *width as f64;
         let h = *height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
@@ -276,57 +314,56 @@ impl Renderer for PPMRenderer {
         let img_guard_clone = Arc::clone(&img_guarded);
         let completion = Arc::new(Mutex::new(0u64));
 
-        (0..*height)
-            .into_par_iter()
-            .for_each(move |y| {
-                let img_guarded = &img_guard_clone;
-                let y = height - y - 1;
-                for x in 0..*width {
-                    let mut pixel = Vec3::zero();
-                    for sy in 0..2 {
-                        for sx in 0..2 {
-                            let mut rad = Vec3::zero();
-                            for _ in 0..num_samples {
-                                let r1 = 2. * random::<f64>();
-                                let dx = if r1 < 1. {
-                                    r1.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r1).sqrt()
-                                };
+        (0..*height).into_par_iter().for_each(move |y| {
+            let img_guarded = &img_guard_clone;
+            let y = height - y - 1;
+            for x in 0..*width {
+                let mut pixel = Vec3::zero();
+                for sy in 0..2 {
+                    for sx in 0..2 {
+                        let mut rad = Vec3::zero();
+                        for _ in 0..num_samples {
+                            let r1 = 2. * random::<f64>();
+                            let dx = if r1 < 1. {
+                                r1.sqrt() - 1.
+                            } else {
+                                1. - (2. - r1).sqrt()
+                            };
 
-                                let r2 = 2. * random::<f64>();
-                                let dy = if r2 < 1. {
-                                    r2.sqrt() - 1.
-                                } else {
-                                    1. - (2. - r2).sqrt()
-                                };
+                            let r2 = 2. * random::<f64>();
+                            let dy = if r2 < 1. {
+                                r2.sqrt() - 1.
+                            } else {
+                                1. - (2. - r2).sqrt()
+                            };
 
-                                let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                                    + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                                    + scene.camera.dir;
+                            let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                + scene.camera.dir;
 
-                                rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
-                                    * (1. / num_samples as f64);
-                            }
-                            pixel += rad.clamp(0., 1.) * 0.25;
+                            rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                                * (1. / num_samples as f64);
                         }
+                        pixel += rad.clamp(0., 1.) * 0.25;
                     }
-                    let mut img = img_guarded.lock().unwrap();
-                    img.set(height - y - 1, x, gamma_correct(&pixel));
                 }
+                let mut img = img_guarded.lock().unwrap();
+                img.set(height - y - 1, x, gamma_correct(&pixel));
+            }
 
-                let mut completion = completion.lock().unwrap();
-                *completion += 1;
-                print!(
-                    "\rRendering at {samples_per_pixel} spp ({:.1}%)",
-                    *completion as f64 / h * 100.
-                );
-            });
+            let mut completion = completion.lock().unwrap();
+            *completion += 1;
+            print!(
+                "\rRendering at {samples_per_pixel} spp ({:.1}%)",
+                *completion as f64 / h * 100.
+            );
+        });
         print!("\n");
 
         let img = img_guarded.lock().unwrap();
-        img.dump(&mut BufWriter::new(file)).expect("failed to dump to file");
-        
+        img.dump(&mut BufWriter::new(file))
+            .expect("failed to dump to file");
+
         // for y in 0..img.height {
         //     for x in 0..img.width {
         //         let i = y * img.width + x;
@@ -339,12 +376,16 @@ impl Renderer for PPMRenderer {
 struct WindowRenderer {
     width: usize,
     height: usize,
-    samples_per_pixel: usize
+    samples_per_pixel: usize,
 }
 
 impl WindowRenderer {
     fn render_row_sync(&self, scene: &Scene, buf: &RwLock<Vec<u8>>, y: usize) {
-        let WindowRenderer { width, height, samples_per_pixel } = self;
+        let WindowRenderer {
+            width,
+            height,
+            samples_per_pixel,
+        } = self;
         let w = *width as f64;
         let h = *height as f64;
         let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
@@ -391,7 +432,6 @@ impl WindowRenderer {
             row[4 * x + 3] = 255;
         }
     }
-
 }
 
 impl Renderer for WindowRenderer {
@@ -410,8 +450,10 @@ impl Renderer for WindowRenderer {
 
         let window_size = window.inner_size();
         let mut pixels = {
-            let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
-            Pixels::new(self.width as u32, self.height as u32, surface_texture).expect("could not create pixel buffer")
+            let surface_texture =
+                SurfaceTexture::new(window_size.width, window_size.height, &window);
+            Pixels::new(self.width as u32, self.height as u32, surface_texture)
+                .expect("could not create pixel buffer")
         };
 
         let buf = Arc::new(RwLock::new(vec![0u8; 4 * self.width * self.height]));
@@ -419,11 +461,9 @@ impl Renderer for WindowRenderer {
         thread::scope(|s| {
             s.spawn(move || {
                 let now = Instant::now();
-                (0..self.height)
-                    .into_par_iter()
-                    .for_each(|y| {
-                        self.render_row_sync(&scene, &buf_ref, y);
-                    });
+                (0..self.height).into_par_iter().for_each(|y| {
+                    self.render_row_sync(&scene, &buf_ref, y);
+                });
                 let elapsed = now.elapsed();
                 println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
             });
@@ -524,13 +564,31 @@ fn main() -> io::Result<()> {
             },
             // Ball 1
             Object {
-                brdf: bright_surf,
+                // brdf: bright_surf,
+                brdf: BRDF::Phong {
+                    kd: 0.4,
+                    ks: 0.05,
+                    power: 50,
+                    color_d: Vec3::new(1.0, 0.0, 0.0),
+                    color_s: Vec3::repeat(1.0)
+                },
                 emitted: Vec3::zero(),
                 body: Body::Mesh(mesh),
+                // body: Body::Sphere(Sphere {
+                //     pos: Vec3::new(27., 16.5, 47.),
+                //     r: 16.5,
+                // }),
             },
             // Ball 2
             Object {
                 brdf: shiny_surf,
+                // brdf: BRDF::Phong {
+                //     kd: 0.2,
+                //     ks: 0.4,
+                //     power: 50,
+                //     color_d: Vec3::repeat(0.7),
+                //     color_s: Vec3::repeat(1.0)
+                // },
                 emitted: Vec3::zero(),
                 body: Body::Sphere(Sphere {
                     pos: Vec3::new(73., 16.5, 68.),
@@ -546,6 +604,14 @@ fn main() -> io::Result<()> {
                     r: 5.,
                 }),
             },
+            Object {
+                brdf: bright_surf,
+                emitted: Vec3::zero(),
+                body: Body::Plane(Plane {
+                    pos: Vec3::new(0., 0., 320.),
+                    n: Vec3::new(0., 0., -1.)
+                })
+            }
         ],
     };
 
