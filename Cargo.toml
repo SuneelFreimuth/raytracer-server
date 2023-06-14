@@ -6,10 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-num = "0.4.0"
 rand = "0.8.5"
 rayon = "1.7"
-obj-rs = "0.7"
 pixels = "0.12.1"
 winit = "0.28"
 winit_input_helper = "0.14"

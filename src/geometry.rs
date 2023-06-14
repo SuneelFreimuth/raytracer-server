@@ -1,11 +1,10 @@
-use obj::{load_obj, Obj};
-use std::io::BufRead;
+use std::io::{self, BufRead};
 use std::iter::Iterator;
 
 use crate::vec3::{determinant3, Ray, Vec3};
 
 #[derive(Clone, Debug)]
-pub enum Body {
+pub enum Geometry {
     Sphere(Sphere),
     Plane(Plane),
     Mesh(Mesh),
@@ -40,7 +39,7 @@ pub struct Hit {
     pub id: usize,
 }
 
-impl Body {
+impl Geometry {
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         match self {
             Self::Sphere(sphere) => {
@@ -87,8 +86,6 @@ impl Body {
                 }
                 let t = (pos - &ray.pos).dot(n) / ray.dir.dot(n);
                 if t >= 0. {
-                    // println!("{:?} hit plane at {:?} with normal {:?}",
-                    //     ray, ray.eval(t), n);
                     let n = if n.dot(&-ray.dir) >= 0. { *n } else { -*n };
                     Some(Hit {
                         t,
@@ -208,6 +205,60 @@ impl<'a> Iterator for TriangleIterator<'a> {
     }
 }
 
+#[derive(Debug)]
+pub enum LoadError {
+    IO(io::Error),
+    Parse(String),
+}
+
+fn parse_int(s: &str) -> Result<usize, LoadError> {
+    s
+        .parse::<usize>()
+        .map_err(|e| LoadError::Parse(format!("Ill-formed integer {s}")))
+}
+
+fn parse_float(s: &str) -> Result<f64, LoadError> {
+    s
+        .parse::<f64>()
+        .map_err(|e| LoadError::Parse(format!("Ill-formed float {s}")))
+}
+
+fn parse_face(s: &str) -> Result<(usize, Option<usize>, Option<usize>), LoadError> {
+    let mut tokens = s.split('/');
+    let i0 = if let Some(tok) = tokens.next() {
+        parse_int(tok)?
+    } else {
+        return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+    };
+    let i1 = if let Some(tok) = tokens.next() {
+        Some(parse_int(tok)?)
+    } else {
+        None
+    };
+    let i2 = if let Some(tok) = tokens.next() {
+        Some(parse_int(tok)?)
+    } else {
+        None
+    };
+    Ok((i0, i1, i2))
+}
+
+fn take_int<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<usize, LoadError> {
+    if let Some(token) = it.next() {
+        parse_int(token)
+    } else {
+        Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+    }
+}
+
+fn take_float<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<f64, LoadError> {
+    if let Some(token) = it.next() {
+        parse_float(token)
+    } else {
+        Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+    }
+}
+
 impl Mesh {
     pub fn new(vertices: Vec<Vec3>, normals: Vec<Vec3>, indices: Vec<usize>) -> Self {
         let mut triangles: Vec<(usize, Triangle)> = Vec::new();
@@ -232,17 +283,56 @@ impl Mesh {
         }
     }
 
-    pub fn load<F: BufRead>(f: F) -> obj::ObjResult<Self> {
-        let model: Obj<obj::Vertex, usize> = load_obj(f)?;
-        let vertices = model.vertices.iter().map(|v| v.position.into()).collect();
-        Ok(Mesh::new(
+    pub fn load<R: BufRead>(r: R) -> Result<Self, LoadError> {
+        let mut vertices: Vec<Vec3> = Vec::new();
+        let mut normals: Vec<Vec3> = Vec::new();
+        let mut indices: Vec<usize> = Vec::new();
+        for line in r.lines() {
+            let line = line.map_err(|io| LoadError::IO(io))?;
+            let mut tokens = line.split_whitespace();
+            if let Some(cmd) = tokens.next() {
+                match cmd {
+                    "v" => {
+                        let x = take_float(&mut tokens)?;
+                        let y = take_float(&mut tokens)?;
+                        let z = take_float(&mut tokens)?;
+                        vertices.push(Vec3 { x, y, z });
+                    }
+                    "vn" => {
+                        let x = take_float(&mut tokens)?;
+                        let y = take_float(&mut tokens)?;
+                        let z = take_float(&mut tokens)?;
+                        normals.push(Vec3 { x, y, z });
+                    }
+                    "f" => {
+                        let (i0, _, _) = if let Some(tok) = tokens.next() {
+                            parse_face(tok)?
+                        } else {
+                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                        };
+                        let (i1, _, _) = if let Some(tok) = tokens.next() {
+                            parse_face(tok)?
+                        } else {
+                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                        };
+                        let (i2, _, _) = if let Some(tok) = tokens.next() {
+                            parse_face(tok)?
+                        } else {
+                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                        };
+                        indices.push(i0 - 1);
+                        indices.push(i1 - 1);
+                        indices.push(i2 - 1);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Ok(Self::new(vertices, normals, indices))
+        Ok(Self::new(
             vertices,
-            model
-                .vertices
-                .iter()
-                .map(|v| Vec3::from(v.normal).norm())
-                .collect(),
-            model.indices,
+            normals,
+            indices,
         ))
     }
 
@@ -314,7 +404,6 @@ impl Mesh {
         }
     }
 
-    // Defined as the centroid
     pub fn center(&self) -> Vec3 {
         self.bounding_box.center()
     }
@@ -336,10 +425,26 @@ impl Mesh {
         self.bounding_box.max += trans;
     }
 
+    pub fn rotate_x(&mut self, angle: f64) {
+        let center = self.center();
+        for v in self.vertices.iter_mut() {
+            *v = center + (*v - center).rotate_x(angle);
+        }
+        self.fit_bounds();
+    }
+
     pub fn rotate_y(&mut self, angle: f64) {
         let center = self.center();
         for v in self.vertices.iter_mut() {
             *v = center + (*v - center).rotate_y(angle);
+        }
+        self.fit_bounds();
+    }
+
+    pub fn rotate_z(&mut self, angle: f64) {
+        let center = self.center();
+        for v in self.vertices.iter_mut() {
+            *v = center + (*v - center).rotate_z(angle);
         }
         self.fit_bounds();
     }
@@ -739,12 +844,7 @@ impl Octree {
         }
     }
 
-    fn _intersect_recurse(
-        &self,
-        node: &Node,
-        bounding_box: BoundingBox,
-        ray: &Ray,
-    ) -> Option<Hit> {
+    fn _intersect_recurse(&self, node: &Node, bounding_box: BoundingBox, ray: &Ray) -> Option<Hit> {
         match node {
             Node::Parent { children } => {
                 let mut octant_search_order = [0, 1, 2, 3, 4, 5, 6, 7];
@@ -766,11 +866,8 @@ impl Octree {
                     let octant = octants[i];
                     if let Some(n) = children[i] {
                         if octant.intersect(ray).is_some() {
-                            if let Some(hit) = self._intersect_recurse(
-                                &self.nodes[n],
-                                octant,
-                                ray,
-                            ) {
+                            if let Some(hit) = self._intersect_recurse(&self.nodes[n], octant, ray)
+                            {
                                 return Some(hit);
                             }
                         }

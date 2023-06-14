@@ -2,7 +2,7 @@
 
 A multithreaded CPU-driven raytracer using pathtracing.
 
-![Raytraced scene of the Cornell Box with a diffuse and a specular ball.](cornell-box.png)
+![Raytraced scene of a winged unicorn statue and an ideal specular ball](pegasus-phong.png)
 
 To run:
 ```shell

@@ -1,19 +1,18 @@
 #[allow(dead_code)]
 use std::f64::consts::{FRAC_1_PI, PI};
-use std::io::{stdout, BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter};
 use std::sync::{Arc, Mutex, RwLock};
-use std::thread::{self, spawn};
+use std::thread;
 use std::time::Instant;
 use std::{fs::File, io};
 
-mod body;
+mod geometry;
 mod ppm;
 mod util;
 mod vec3;
 
-use pixels::{Error, Pixels, SurfaceTexture};
+use pixels::{Pixels, SurfaceTexture};
 use rand::random;
-use rand::seq::index::sample;
 use rayon::prelude::*;
 use winit::{
     dpi::LogicalSize,
@@ -23,33 +22,17 @@ use winit::{
 };
 use winit_input_helper::WinitInputHelper;
 
-use body::{Body, Hit, Mesh, Plane, Sphere};
-use util::map;
+use geometry::{Geometry, Hit, Mesh, Plane, Sphere};
 use vec3::*;
 
-use crate::body::Node;
-use crate::ppm::Image;
-
-const WIDTH: usize = 480;
-const HEIGHT: usize = 360;
-const MAXVAL: u64 = 255;
-static mut NUM_SAMPLES: usize = 4;
+const WIDTH: usize = 600;
+const HEIGHT: usize = 450;
 
 #[derive(Clone, Debug)]
-struct Object {
+pub struct Object {
     emitted: Vec3,
     brdf: BRDF,
-    body: Body,
-}
-
-impl Object {
-    pub fn new_sphere(r: f64, pos: Vec3, emitted: Vec3, brdf: BRDF) -> Self {
-        Self {
-            emitted,
-            brdf,
-            body: Body::Sphere(Sphere { pos, r }),
-        }
-    }
+    body: Geometry,
 }
 
 pub fn create_local_coord(n: &Vec3) -> (Vec3, Vec3, Vec3) {
@@ -74,7 +57,7 @@ pub enum BRDF {
         ks: f64,
         power: i32,
         color_d: Vec3,
-        color_s: Vec3
+        color_s: Vec3,
     },
 }
 
@@ -89,10 +72,17 @@ impl BRDF {
                     Vec3::zero()
                 }
             }
-            Self::Phong { ks, kd, power, color_d, color_s } => {
+            Self::Phong {
+                ks,
+                kd,
+                power,
+                color_d,
+                color_s,
+            } => {
                 let reflection = i.flip_across(n);
                 color_d * *kd * FRAC_1_PI
-                    + color_s * *ks * (power + 2) as f64 / (2. * PI) * o.dot(&reflection).max(0.).powi(*power)
+                    + color_s * *ks * (power + 2) as f64 / (2. * PI)
+                        * o.dot(&reflection).max(0.).powi(*power)
             }
         }
     }
@@ -113,7 +103,7 @@ impl BRDF {
                 (i, n.dot(&i) * FRAC_1_PI)
             }
             Self::Specular(_) => (o.flip_across(n), 1.0),
-            Self::Phong { kd, power, .. } => {
+            Self::Phong { kd, ks, power, .. } => {
                 let p = *power as f64;
                 let u = random::<f64>();
                 if u < *kd {
@@ -123,10 +113,10 @@ impl BRDF {
                     let i = Vec3 {
                         x: (1. - xi1).sqrt() * (2. * PI * xi2).cos(),
                         y: (1. - xi1).sqrt() * (2. * PI * xi2).sin(),
-                        z: xi1.sqrt()
+                        z: xi1.sqrt(),
                     };
                     (i, i.z * FRAC_1_PI)
-                } else {
+                } else if *kd <= u && u < kd + ks {
                     // Specular sample
                     let xi1 = random::<f64>();
                     let xi2 = random::<f64>();
@@ -135,10 +125,10 @@ impl BRDF {
                         y: (1. - xi1.powf(2. / (p + 1.))).sqrt() * (2. * PI * xi2).sin(),
                         z: xi1.powf(1. / (p + 1.)),
                     };
-                    (
-                        i,
-                        (p + 1.) / (2. * PI) * i.z.powi(*power)
-                    )
+                    (i, (p + 1.) / (2. * PI) * i.z.powi(*power))
+                } else {
+                    // No contribution
+                    (Vec3::zero(), 1.0)
                 }
             }
         }
@@ -148,6 +138,7 @@ impl BRDF {
 pub struct Scene {
     camera: Ray,
     objects: Vec<Object>,
+    light_source: usize,
 }
 
 fn gamma_correct(v: &Vec3) -> Vec3 {
@@ -157,15 +148,22 @@ fn gamma_correct(v: &Vec3) -> Vec3 {
 const MAX_BOUNCES: u64 = 5;
 const SURVIVAL_PROBABILITY: f64 = 0.9;
 
-fn concat<T: Clone>(a: Vec<T>, b: Vec<T>) -> Vec<T> {
-    let mut c = a.clone();
-    for el in b {
-        c.push(el);
-    }
-    c
-}
-
 impl Scene {
+    pub fn new(camera: Ray, objects: Vec<Object>) -> Self {
+        Self {
+            light_source: 'find_source: {
+                for (i, obj) in objects.iter().enumerate() {
+                    if !obj.emitted.equal_within(&Vec3::zero(), 0.00001) {
+                        break 'find_source i;
+                    }
+                }
+                unreachable!();
+            },
+            camera,
+            objects,
+        }
+    }
+
     fn received_radiance(&self, r: &Ray) -> Vec3 {
         if let Some(hit) = self.trace_ray(r) {
             let obj = &self.objects[hit.id as usize];
@@ -205,7 +203,9 @@ impl Scene {
             let i = (y - x).norm();
             let r_sqr = (y - x).dot(&(y - x));
             let visibility = self.mutually_visible(&x, &y);
-            let mut rad = self.objects[7].emitted.mult(&obj.brdf.eval(n, o, &i))
+            let mut rad = self.objects[self.light_source]
+                .emitted
+                .mult(&obj.brdf.eval(n, o, &i))
                 * visibility
                 * n.dot(&i)
                 * ny.dot(&-i)
@@ -227,8 +227,8 @@ impl Scene {
     }
 
     fn sample_light_source(&self) -> (Vec3, Vec3, f64) {
-        match self.objects[7].body {
-            Body::Sphere(Sphere { pos: center, r }) => {
+        match self.objects[self.light_source].body {
+            Geometry::Sphere(Sphere { pos: center, r }) => {
                 let xi1 = random::<f64>();
                 let xi2 = random::<f64>();
 
@@ -347,29 +347,27 @@ impl Renderer for PPMRenderer {
                         pixel += rad.clamp(0., 1.) * 0.25;
                     }
                 }
-                let mut img = img_guarded.lock().unwrap();
-                img.set(height - y - 1, x, gamma_correct(&pixel));
-            }
 
-            let mut completion = completion.lock().unwrap();
-            *completion += 1;
-            print!(
-                "\rRendering at {samples_per_pixel} spp ({:.1}%)",
-                *completion as f64 / h * 100.
-            );
+                {
+                    let mut img = img_guarded.lock().unwrap();
+                    img.set(height - y - 1, x, gamma_correct(&pixel));
+                }
+
+                {
+                    let mut completion = completion.lock().unwrap();
+                    *completion += 1;
+                    print!(
+                        "\rRendering at {samples_per_pixel} spp ({:.1}%)",
+                        *completion as f64 / (w * h) * 100.
+                    );
+                }
+            }
         });
         print!("\n");
 
         let img = img_guarded.lock().unwrap();
         img.dump(&mut BufWriter::new(file))
             .expect("failed to dump to file");
-
-        // for y in 0..img.height {
-        //     for x in 0..img.width {
-        //         let i = y * img.width + x;
-        //         img.set(y, x, gamma_correct(&pixels[i]));
-        //     }
-        // }
     }
 }
 
@@ -439,7 +437,7 @@ impl Renderer for WindowRenderer {
         let event_loop = EventLoop::new();
         let mut input = WinitInputHelper::new();
         let window = {
-            let size = LogicalSize::new(480., 360.);
+            let size = LogicalSize::new(self.width as u32, self.height as u32);
             WindowBuilder::new()
                 .with_title("Raytracer")
                 .with_inner_size(size)
@@ -490,38 +488,59 @@ impl Renderer for WindowRenderer {
 }
 
 fn main() -> io::Result<()> {
-    let left_wall = BRDF::Diffuse(Vec3::new(0.75, 0.25, 0.25));
-    let right_wall = BRDF::Diffuse(Vec3::new(0.25, 0.25, 0.75));
-    let other_wall = BRDF::Diffuse(Vec3::new(0.75, 0.75, 0.75));
+    let wall = |color_d| BRDF::Phong {
+        kd: 0.8,
+        ks: 0.05,
+        power: 50,
+        color_d,
+        color_s: Vec3::repeat(0.99),
+    };
+    // let left_wall = BRDF::Diffuse(Vec3::new(0.75, 0.25, 0.25));
+    // let right_wall = BRDF::Diffuse(Vec3::new(0.25, 0.25, 0.75));
+    // let other_wall = BRDF::Diffuse(Vec3::new(0.75, 0.75, 0.75));
+    let left_wall = wall(Vec3::new(0.75, 0.25, 0.25));
+    let right_wall = wall(Vec3::new(0.25, 0.25, 0.75));
+    let other_wall = wall(Vec3::new(0.75, 0.75, 0.75));
     let black_surf = BRDF::Diffuse(Vec3::repeat(0.0));
     let bright_surf = BRDF::Diffuse(Vec3::repeat(0.9));
     let shiny_surf = BRDF::Specular(Vec3::repeat(0.999));
 
-    let f = BufReader::new(File::open("assets/crewmate.obj")?);
-    let mut mesh = Mesh::load(f).expect("could not open model");
-    mesh.scale(0.3);
-    mesh.translate(&Vec3::new(30., -70., 75.));
-    mesh.rotate_y(0.5);
-    mesh.accelerate();
-
-    // let f = BufReader::new(File::open("assets/chair.obj")?);
-    // let mut mesh = Mesh::load(f).expect("could not open model");
-    // mesh.scale(25.);
+    // let f = BufReader::new(File::open("assets/augustus.obj")?);
+    // let mut mesh = Mesh::my_load(f).expect("could not open model");
+    // println!("Mesh consists of {} triangles", mesh.num_triangles());
+    // mesh.scale(20.);
     // mesh.translate(&Vec3::new(30., 20.01, 65.));
     // mesh.rotate_y(0.5);
     // mesh.accelerate();
 
-    let scene = Scene {
-        camera: Ray {
+    // let f = BufReader::new(File::open("assets/crewmate.obj")?);
+    // let mut mesh = Mesh::load(f).expect("could not open model");
+    // mesh.scale(0.3);
+    // mesh.translate(&Vec3::new(30., -70., 75.));
+    // mesh.rotate_y(0.5);
+    // mesh.accelerate();
+
+    let f = BufReader::new(File::open("assets/flying-unicorn.obj")?);
+    let mut mesh = Mesh::load(f).expect("could not open model");
+    println!("Mesh has {} triangles.", mesh.num_triangles());
+    println!("{:?}", mesh.bounding_box);
+    mesh.scale(5.);
+    mesh.translate(&Vec3::new(35., 25., 65.));
+    mesh.rotate_z(-0.4);
+    mesh.rotate_x(-PI / 2.);
+    mesh.accelerate();
+
+    let scene = Scene::new(
+        Ray {
             pos: Vec3::new(50., 52., 295.6),
             dir: Vec3::new(0., -0.042612, -1.).norm(),
         },
-        objects: vec![
+        vec![
             // Left
             Object {
                 brdf: left_wall,
                 emitted: Vec3::zero(),
-                body: Body::Plane(Plane {
+                body: Geometry::Plane(Plane {
                     pos: Vec3::new(1., 0., 0.),
                     n: Vec3::new(1., 0., 0.),
                 }),
@@ -530,7 +549,7 @@ fn main() -> io::Result<()> {
             Object {
                 brdf: right_wall,
                 emitted: Vec3::zero(),
-                body: Body::Plane(Plane {
+                body: Geometry::Plane(Plane {
                     pos: Vec3::new(99., 0., 0.),
                     n: Vec3::new(-1., 0., 0.),
                 }),
@@ -539,7 +558,7 @@ fn main() -> io::Result<()> {
             Object {
                 emitted: Vec3::zero(),
                 brdf: other_wall,
-                body: Body::Plane(Plane {
+                body: Geometry::Plane(Plane {
                     pos: Vec3::new(0., 0., 0.),
                     n: Vec3::new(0., 0., -1.),
                 }),
@@ -548,7 +567,7 @@ fn main() -> io::Result<()> {
             Object {
                 brdf: other_wall,
                 emitted: Vec3::zero(),
-                body: Body::Plane(Plane {
+                body: Geometry::Plane(Plane {
                     pos: Vec3::new(0., 0., 0.),
                     n: Vec3::new(0., 1., 0.),
                 }),
@@ -557,7 +576,7 @@ fn main() -> io::Result<()> {
             Object {
                 brdf: other_wall,
                 emitted: Vec3::zero(),
-                body: Body::Plane(Plane {
+                body: Geometry::Plane(Plane {
                     pos: Vec3::new(0., 81.6, 0.),
                     n: Vec3::new(0., -1., 0.),
                 }),
@@ -566,14 +585,14 @@ fn main() -> io::Result<()> {
             Object {
                 // brdf: bright_surf,
                 brdf: BRDF::Phong {
-                    kd: 0.4,
-                    ks: 0.05,
-                    power: 50,
-                    color_d: Vec3::new(1.0, 0.0, 0.0),
-                    color_s: Vec3::repeat(1.0)
+                    kd: 0.7,
+                    ks: 0.2,
+                    power: 100,
+                    color_d: Vec3::new(1.0, 1.0, 1.0),
+                    color_s: Vec3::repeat(1.0),
                 },
                 emitted: Vec3::zero(),
-                body: Body::Mesh(mesh),
+                body: Geometry::Mesh(mesh),
                 // body: Body::Sphere(Sphere {
                 //     pos: Vec3::new(27., 16.5, 47.),
                 //     r: 16.5,
@@ -590,43 +609,35 @@ fn main() -> io::Result<()> {
                 //     color_s: Vec3::repeat(1.0)
                 // },
                 emitted: Vec3::zero(),
-                body: Body::Sphere(Sphere {
+                body: Geometry::Sphere(Sphere {
                     pos: Vec3::new(73., 16.5, 68.),
                     r: 16.5,
+                }),
+            },
+            // Wall behind camera
+            Object {
+                brdf: bright_surf,
+                emitted: Vec3::zero(),
+                body: Geometry::Plane(Plane {
+                    pos: Vec3::new(0., 0., 320.),
+                    n: Vec3::new(0., 0., -1.),
                 }),
             },
             // Light
             Object {
                 brdf: black_surf,
                 emitted: Vec3::repeat(50.),
-                body: Body::Sphere(Sphere {
-                    pos: Vec3::new(50., 70., 81.6),
+                body: Geometry::Sphere(Sphere {
+                    pos: Vec3::new(25., 70., 100.),
+                    // pos: Vec3::new(50., 70., 81.6),
                     r: 5.,
                 }),
             },
-            Object {
-                brdf: bright_surf,
-                emitted: Vec3::zero(),
-                body: Body::Plane(Plane {
-                    pos: Vec3::new(0., 0., 320.),
-                    n: Vec3::new(0., 0., -1.)
-                })
-            }
         ],
-    };
+    );
 
     let args: Vec<String> = std::env::args().collect();
-    // let renderer = PPMRenderer {
-    //     width: WIDTH,
-    //     height: HEIGHT,
-    //     samples_per_pixel: if let Some(arg) = args.get(1) {
-    //         arg.parse().unwrap()
-    //     } else {
-    //         4
-    //     },
-    //     file: File::create("image.ppm").expect("could not open image file for writing")
-    // };
-    let renderer = WindowRenderer {
+    let renderer = PPMRenderer {
         width: WIDTH,
         height: HEIGHT,
         samples_per_pixel: if let Some(arg) = args.get(1) {
@@ -634,7 +645,17 @@ fn main() -> io::Result<()> {
         } else {
             4
         },
+        file: File::create("image.ppm").expect("could not open image file for writing"),
     };
+    // let renderer = WindowRenderer {
+    //     width: WIDTH,
+    //     height: HEIGHT,
+    //     samples_per_pixel: if let Some(arg) = args.get(1) {
+    //         arg.parse().unwrap()
+    //     } else {
+    //         4
+    //     },
+    // };
     renderer.render(&scene);
 
     Ok(())

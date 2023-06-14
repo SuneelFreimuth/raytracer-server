@@ -83,11 +83,27 @@ impl Vec3 {
         }
     }
 
+    pub fn rotate_x(&self, angle: f64) -> Self {
+        Self {
+            x: self.x,
+            y: self.y * angle.cos() - self.z * angle.sin(),
+            z: self.y * angle.sin() + self.z * angle.cos()
+        }
+    }
+
     pub fn rotate_y(&self, angle: f64) -> Self {
         Self {
             x: self.x * angle.cos() + self.z * angle.sin(),
             y: self.y,
             z: self.z * angle.cos() - self.x * angle.sin()
+        }
+    }
+
+    pub fn rotate_z(&self, angle: f64) -> Self {
+        Self {
+            x: self.x * angle.cos() - self.y * angle.sin(),
+            y: self.x * angle.sin() + self.y * angle.cos(),
+            z: self.z
         }
     }
 }
