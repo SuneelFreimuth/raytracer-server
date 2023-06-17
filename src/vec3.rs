@@ -21,6 +21,14 @@ impl Vec3 {
         Self { x: 0., y: 0., z: 0. }
     }
 
+    pub fn from_spherical(inclination: f64, azimuth: f64) -> Self {
+        Self {
+            x: inclination.sin() * azimuth.cos(),
+            y: inclination.sin() * azimuth.sin(),
+            z: inclination.cos()
+        }
+    }
+
     pub fn abs(&self) -> Self {
         Self {
             x: self.x.abs(),

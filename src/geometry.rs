@@ -340,16 +340,16 @@ impl Mesh {
         self.octree = Some(Octree::build(self));
     }
 
-    pub fn cube(p: &Vec3, s: f64) -> Self {
+    pub fn prism(p: &Vec3, width: f64, height: f64, depth: f64) -> Self {
         let vertices = vec![
             Vec3::new(p.x, p.y, p.z),
-            Vec3::new(p.x, p.y, p.z + s),
-            Vec3::new(p.x, p.y + s, p.z),
-            Vec3::new(p.x, p.y + s, p.z + s),
-            Vec3::new(p.x + s, p.y, p.z),
-            Vec3::new(p.x + s, p.y, p.z + s),
-            Vec3::new(p.x + s, p.y + s, p.z),
-            Vec3::new(p.x + s, p.y + s, p.z + s),
+            Vec3::new(p.x, p.y, p.z + depth),
+            Vec3::new(p.x, p.y + height, p.z),
+            Vec3::new(p.x, p.y + height, p.z + depth),
+            Vec3::new(p.x + width, p.y, p.z),
+            Vec3::new(p.x + width, p.y, p.z + depth),
+            Vec3::new(p.x + width, p.y + height, p.z),
+            Vec3::new(p.x + width, p.y + height, p.z + depth),
         ];
         Mesh::new(
             vertices,
@@ -363,6 +363,10 @@ impl Mesh {
                 0, 1, 5, 0, 4, 5, // Bottom
             ],
         )
+    }
+
+    pub fn cube(p: &Vec3, s: f64) -> Self {
+        Self::prism(p, s, s, s)
     }
 
     pub fn num_triangles(&self) -> usize {
