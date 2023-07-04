@@ -1,4 +1,5 @@
 use std::ops;
+
 use crate::util::clamp;
 
 #[derive(Debug, Clone, PartialEq, Copy)]
@@ -128,6 +129,16 @@ impl From<[f32; 3]> for Vec3 {
             x: value[0] as f64,
             y: value[1] as f64,
             z: value[2] as f64
+        }
+    }
+}
+
+impl From<[f64; 3]> for Vec3 {
+    fn from(value: [f64; 3]) -> Self {
+        Self {
+            x: value[0],
+            y: value[1],
+            z: value[2]
         }
     }
 }

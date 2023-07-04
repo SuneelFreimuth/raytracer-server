@@ -1,41 +1,40 @@
-use std::fs::File;
 use std::io;
 use std::io::Write;
-
-use crate::vec3::Vec3;
 
 pub struct Image {
     pub width: usize,
     pub height: usize,
-    pub maxval: f64,
-    pub pixels: Vec<Vec3>,
+    pub pixels: Vec<u8>,
 }
 
 impl Image {
-    pub fn new(width: usize, height: usize, maxval: u64) -> Self {
+    pub fn new(width: usize, height: usize) -> Self {
         Self {
             width,
             height,
-            maxval: maxval as f64,
-            pixels: vec![Vec3::zero(); width * height],
+            pixels: vec![0; 3 * width * height],
         }
     }
 
     pub fn dump<W: Write>(&self, w: &mut W) -> io::Result<()> {
         writeln!(w, "P3")?;
         writeln!(w, "{} {}", self.width, self.height)?;
-        writeln!(w, "{}", self.maxval)?;
+        writeln!(w, "255")?;
         for r in 0..self.height {
             for c in 0..self.width {
-                let Vec3 { x, y, z } = self.pixels[self.width * r + c];
-                write!(w, "{} {} {} ", x as u64, y as u64, z as u64)?;
+                let i = 3 * (self.width * r + c);
+                let [r, g, b] = self.pixels[i..i + 3] else { unreachable!() };
+                write!(w, "{r} {g} {b} ")?;
             }
             write!(w, "\n")?;
         }
         Ok(())
     }
 
-    pub fn set(&mut self, r: usize, c: usize, color: Vec3) {
-        self.pixels[self.width * r + c] = color.clamp(0., self.maxval);
+    // Color must be an rgb triple `&[r, g, b]`.
+    pub fn set(&mut self, r: usize, c: usize, color: &[u8]) {
+        assert!(color.len() == 3);
+        let i = 3 * (self.width * r + c);
+        self.pixels[i..i + 3].copy_from_slice(color);
     }
 }

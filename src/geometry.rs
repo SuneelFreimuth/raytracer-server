@@ -40,6 +40,89 @@ pub struct Hit {
 }
 
 impl Geometry {
+    pub fn translate(&mut self, trans: &Vec3) {
+        match self {
+            Self::Sphere(sphere) => {
+                sphere.pos += trans;
+            }
+            Self::Plane(plane) => {
+                plane.pos += trans;
+            }
+            Self::Mesh(mesh) => {
+                for v in mesh.vertices.iter_mut() {
+                    *v += trans;
+                }
+                mesh.bounding_box.min += trans;
+                mesh.bounding_box.max += trans;
+            }
+        }
+    }
+
+    pub fn rotate_x(&mut self, angle: f64) {
+        match self {
+            Self::Sphere(_) => {}
+            Self::Plane(plane) => {
+                plane.n = plane.n.rotate_x(angle);
+            }
+            Self::Mesh(mesh) => {
+                let center = mesh.center();
+                for v in mesh.vertices.iter_mut() {
+                    *v = center + (*v - center).rotate_x(angle);
+                }
+                mesh.fit_bounds();
+            }
+        }
+    }
+
+    pub fn rotate_y(&mut self, angle: f64) {
+        match self {
+            Self::Sphere(_) => {}
+            Self::Plane(plane) => {
+                plane.n = plane.n.rotate_y(angle);
+            }
+            Self::Mesh(mesh) => {
+                let center = mesh.center();
+                for v in mesh.vertices.iter_mut() {
+                    *v = center + (*v - center).rotate_y(angle);
+                }
+                mesh.fit_bounds();
+            }
+        }
+    }
+
+    pub fn rotate_z(&mut self, angle: f64) {
+        match self {
+            Self::Sphere(_) => {}
+            Self::Plane(plane) => {
+                plane.n = plane.n.rotate_z(angle);
+            }
+            Self::Mesh(mesh) => {
+                let center = mesh.center();
+                for v in mesh.vertices.iter_mut() {
+                    *v = center + (*v - center).rotate_z(angle);
+                }
+                mesh.fit_bounds();
+            }
+        }
+    }
+
+    pub fn scale(&mut self, s: f64) {
+        match self {
+            Self::Sphere(sphere) => {
+                sphere.r *= s;
+            }
+            Self::Mesh(mesh) => {
+                let center = mesh.center();
+                for v in mesh.vertices.iter_mut() {
+                    *v = center + (*v - center) * s;
+                }
+                mesh.bounding_box.min = mesh.bounding_box.min + (mesh.bounding_box.min - center) * s;
+                mesh.bounding_box.max = mesh.bounding_box.max + (mesh.bounding_box.max - center) * s;
+            }
+            Self::Plane(_) => {}
+        }
+    }
+
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         match self {
             Self::Sphere(sphere) => {
@@ -206,29 +289,29 @@ impl<'a> Iterator for TriangleIterator<'a> {
 }
 
 #[derive(Debug)]
-pub enum LoadError {
+pub enum MeshLoadError {
     IO(io::Error),
     Parse(String),
 }
 
-fn parse_int(s: &str) -> Result<usize, LoadError> {
+fn parse_int(s: &str) -> Result<usize, MeshLoadError> {
     s
         .parse::<usize>()
-        .map_err(|e| LoadError::Parse(format!("Ill-formed integer {s}")))
+        .map_err(|e| MeshLoadError::Parse(format!("Ill-formed integer {s}: {e}")))
 }
 
-fn parse_float(s: &str) -> Result<f64, LoadError> {
+fn parse_float(s: &str) -> Result<f64, MeshLoadError> {
     s
         .parse::<f64>()
-        .map_err(|e| LoadError::Parse(format!("Ill-formed float {s}")))
+        .map_err(|e| MeshLoadError::Parse(format!("Ill-formed float {s}: {e}")))
 }
 
-fn parse_face(s: &str) -> Result<(usize, Option<usize>, Option<usize>), LoadError> {
+fn parse_face(s: &str) -> Result<(usize, Option<usize>, Option<usize>), MeshLoadError> {
     let mut tokens = s.split('/');
     let i0 = if let Some(tok) = tokens.next() {
         parse_int(tok)?
     } else {
-        return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+        return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
     };
     let i1 = if let Some(tok) = tokens.next() {
         Some(parse_int(tok)?)
@@ -243,19 +326,19 @@ fn parse_face(s: &str) -> Result<(usize, Option<usize>, Option<usize>), LoadErro
     Ok((i0, i1, i2))
 }
 
-fn take_int<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<usize, LoadError> {
+fn take_int<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<usize, MeshLoadError> {
     if let Some(token) = it.next() {
         parse_int(token)
     } else {
-        Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+        Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
     }
 }
 
-fn take_float<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<f64, LoadError> {
+fn take_float<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<f64, MeshLoadError> {
     if let Some(token) = it.next() {
         parse_float(token)
     } else {
-        Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+        Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
     }
 }
 
@@ -283,12 +366,12 @@ impl Mesh {
         }
     }
 
-    pub fn load<R: BufRead>(r: R) -> Result<Self, LoadError> {
+    pub fn load<R: BufRead>(r: R) -> Result<Self, MeshLoadError> {
         let mut vertices: Vec<Vec3> = Vec::new();
         let mut normals: Vec<Vec3> = Vec::new();
         let mut indices: Vec<usize> = Vec::new();
         for line in r.lines() {
-            let line = line.map_err(|io| LoadError::IO(io))?;
+            let line = line.map_err(|io| MeshLoadError::IO(io))?;
             let mut tokens = line.split_whitespace();
             if let Some(cmd) = tokens.next() {
                 match cmd {
@@ -308,17 +391,17 @@ impl Mesh {
                         let (i0, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
                         };
                         let (i1, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
                         };
                         let (i2, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(LoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
                         };
                         indices.push(i0 - 1);
                         indices.push(i1 - 1);
@@ -412,47 +495,6 @@ impl Mesh {
         self.bounding_box.center()
     }
 
-    pub fn scale(&mut self, s: f64) {
-        let center = self.center();
-        for v in self.vertices.iter_mut() {
-            *v = center + (*v - center) * s;
-        }
-        self.bounding_box.min = self.bounding_box.min + (self.bounding_box.min - center) * s;
-        self.bounding_box.max = self.bounding_box.max + (self.bounding_box.max - center) * s;
-    }
-
-    pub fn translate(&mut self, trans: &Vec3) {
-        for v in self.vertices.iter_mut() {
-            *v += trans;
-        }
-        self.bounding_box.min += trans;
-        self.bounding_box.max += trans;
-    }
-
-    pub fn rotate_x(&mut self, angle: f64) {
-        let center = self.center();
-        for v in self.vertices.iter_mut() {
-            *v = center + (*v - center).rotate_x(angle);
-        }
-        self.fit_bounds();
-    }
-
-    pub fn rotate_y(&mut self, angle: f64) {
-        let center = self.center();
-        for v in self.vertices.iter_mut() {
-            *v = center + (*v - center).rotate_y(angle);
-        }
-        self.fit_bounds();
-    }
-
-    pub fn rotate_z(&mut self, angle: f64) {
-        let center = self.center();
-        for v in self.vertices.iter_mut() {
-            *v = center + (*v - center).rotate_z(angle);
-        }
-        self.fit_bounds();
-    }
-
     pub fn fit_bounds(&mut self) {
         self.bounding_box = BoundingBox::enclose(&self.vertices);
     }
@@ -496,68 +538,7 @@ impl BoundingBox {
         }
         Self { min, max }
     }
-
-    pub fn enclose_triangle(triangle: &Triangle) -> Self {
-        let Triangle { a, b, c } = triangle;
-        let mut min = a.clone();
-        let mut max = a.clone();
-
-        for p in [b, c] {
-            if p.x < min.x {
-                min.x = p.x;
-            }
-            if p.x > max.x {
-                max.x = p.x;
-            }
-
-            if p.y < min.y {
-                min.y = p.y;
-            }
-            if p.y > max.y {
-                max.y = p.y;
-            }
-
-            if p.z < min.z {
-                min.z = p.z;
-            }
-            if p.z > max.z {
-                max.z = p.z;
-            }
-        }
-
-        Self { min, max }
-    }
-
-    pub fn enclose_triangles(triangles: &Vec<Triangle>) -> Self {
-        let mut min = Vec3::repeat(f64::INFINITY);
-        let mut max = Vec3::repeat(-f64::INFINITY);
-        for Triangle { a, b, c } in triangles {
-            for p in [a, b, c] {
-                if p.x < min.x {
-                    min.x = p.x;
-                }
-                if p.x > max.x {
-                    max.x = p.x;
-                }
-
-                if p.y < min.y {
-                    min.y = p.y;
-                }
-                if p.y > max.y {
-                    max.y = p.y;
-                }
-
-                if p.z < min.z {
-                    min.z = p.z;
-                }
-                if p.z > max.z {
-                    max.z = p.z;
-                }
-            }
-        }
-        Self { min, max }
-    }
-
+    
     fn _overlaps(&self, b: &Self) -> bool {
         self.min.x <= b.max.x
             && self.max.x >= b.min.x
@@ -653,17 +634,17 @@ impl BoundingBox {
     }
 
     pub fn overlaps_triangle(&self, t: &Triangle) -> bool {
-        let b = Self::enclose(&vec![t.a, t.b, t.c]);
-        self.overlaps(&b)
+        // let b = Self::enclose(&vec![t.a, t.b, t.c]);
+        // self.overlaps(&b)
 
-        // let Triangle { a, b, c } = t;
-        // if self.contains(a) || self.contains(b) || self.contains(c) {
-        //     return true;
-        // }
+        let Triangle { a, b, c } = t;
+        if self.contains(a) || self.contains(b) || self.contains(c) {
+            return true;
+        }
 
-        // self.intersect_line_segment(a, b)
-        //     || self.intersect_line_segment(a, c)
-        //     || self.intersect_line_segment(b, c)
+        self.intersect_line_segment(a, b)
+            || self.intersect_line_segment(a, c)
+            || self.intersect_line_segment(b, c)
     }
 
     pub fn center(&self) -> Vec3 {
