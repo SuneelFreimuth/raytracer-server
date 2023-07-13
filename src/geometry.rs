@@ -1,5 +1,11 @@
+use std::f64::consts::PI;
 use std::io::{self, BufRead};
 use std::iter::Iterator;
+
+use pixels::wgpu::SurfaceStatus;
+use rand::distributions::WeightedIndex;
+use rand::prelude::Distribution;
+use rand::{random, thread_rng};
 
 use crate::vec3::{determinant3, Ray, Vec3};
 
@@ -27,8 +33,11 @@ pub struct Mesh {
     pub vertices: Vec<Vec3>,
     pub normals: Vec<Vec3>,
     pub indices: Vec<usize>,
-    pub octree: Option<Octree>,
     pub bounding_box: BoundingBox,
+    pub surface_area: f64,
+    octree: Option<Octree>,
+    // Distribution of triangle indices weighted by surface area
+    triangle_selector: WeightedIndex<f64>,
 }
 
 #[derive(Copy, Debug, Clone)]
@@ -60,11 +69,11 @@ impl Geometry {
 
     pub fn rotate_x(&mut self, angle: f64) {
         match self {
-            Self::Sphere(_) => {}
-            Self::Plane(plane) => {
+            &mut Self::Sphere(_) => {}
+            &mut Self::Plane(ref mut plane) => {
                 plane.n = plane.n.rotate_x(angle);
             }
-            Self::Mesh(mesh) => {
+            &mut Self::Mesh(ref mut mesh) => {
                 let center = mesh.center();
                 for v in mesh.vertices.iter_mut() {
                     *v = center + (*v - center).rotate_x(angle);
@@ -76,11 +85,11 @@ impl Geometry {
 
     pub fn rotate_y(&mut self, angle: f64) {
         match self {
-            Self::Sphere(_) => {}
-            Self::Plane(plane) => {
+            &mut Self::Sphere(_) => {}
+            &mut Self::Plane(ref mut plane) => {
                 plane.n = plane.n.rotate_y(angle);
             }
-            Self::Mesh(mesh) => {
+            &mut Self::Mesh(ref mut mesh) => {
                 let center = mesh.center();
                 for v in mesh.vertices.iter_mut() {
                     *v = center + (*v - center).rotate_y(angle);
@@ -92,11 +101,11 @@ impl Geometry {
 
     pub fn rotate_z(&mut self, angle: f64) {
         match self {
-            Self::Sphere(_) => {}
-            Self::Plane(plane) => {
+            &mut Self::Sphere(_) => {}
+            &mut Self::Plane(ref mut plane) => {
                 plane.n = plane.n.rotate_z(angle);
             }
-            Self::Mesh(mesh) => {
+            &mut Self::Mesh(ref mut mesh) => {
                 let center = mesh.center();
                 for v in mesh.vertices.iter_mut() {
                     *v = center + (*v - center).rotate_z(angle);
@@ -108,18 +117,20 @@ impl Geometry {
 
     pub fn scale(&mut self, s: f64) {
         match self {
-            Self::Sphere(sphere) => {
+            &mut Self::Sphere(ref mut sphere) => {
                 sphere.r *= s;
             }
-            Self::Mesh(mesh) => {
+            &mut Self::Mesh(ref mut mesh) => {
                 let center = mesh.center();
                 for v in mesh.vertices.iter_mut() {
                     *v = center + (*v - center) * s;
                 }
-                mesh.bounding_box.min = mesh.bounding_box.min + (mesh.bounding_box.min - center) * s;
-                mesh.bounding_box.max = mesh.bounding_box.max + (mesh.bounding_box.max - center) * s;
+                mesh.bounding_box.min =
+                    mesh.bounding_box.min + (mesh.bounding_box.min - center) * s;
+                mesh.bounding_box.max =
+                    mesh.bounding_box.max + (mesh.bounding_box.max - center) * s;
             }
-            Self::Plane(_) => {}
+            &mut Self::Plane(_) => {}
         }
     }
 
@@ -162,7 +173,7 @@ impl Geometry {
 
                 None
             }
-            Self::Plane(Plane { pos, n }) => {
+            Self::Plane(Plane { ref pos, ref n }) => {
                 let d_dot_n = ray.dir.dot(n);
                 if d_dot_n.abs() < 0.0001 {
                     return None;
@@ -183,6 +194,30 @@ impl Geometry {
             Self::Mesh(mesh) => mesh.intersect(ray),
         }
     }
+
+    pub fn sample(&self) -> (Vec3, Vec3, f64) {
+        match self {
+            Geometry::Sphere(Sphere { pos, r }) => {
+                let xi1 = random::<f64>();
+                let xi2 = random::<f64>();
+
+                let z = 2. * xi1 - 1.;
+                let x = (1.0 - z * z).sqrt() * (2. * PI * xi2).cos();
+                let y = (1.0 - z * z).sqrt() * (2. * PI * xi2).sin();
+
+                let n = Vec3::new(x, y, z).norm();
+                let sample = pos + n * r;
+                let pdf = 1.0 / (4.0 * PI * r * r);
+                (sample, n, pdf)
+            }
+            Geometry::Mesh(mesh) => {
+                let i = mesh.triangle_selector.sample(&mut thread_rng());
+                let (pos, n, _) = mesh.triangle(i).sample();
+                (pos, n, 1. / mesh.surface_area)
+            }
+            Geometry::Plane(_) => unimplemented!(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,6 +232,33 @@ impl Triangle {
         (self.c - self.a).cross(&(self.b - self.a)).norm()
     }
 
+    pub fn sides(&self) -> (Vec3, Vec3, Vec3) {
+        (self.a - self.b, self.b - self.c, self.c - self.a)
+    }
+
+    pub fn area(&self) -> f64 {
+        // Heron's Formula.
+        let (ab, bc, ca) = self.sides();
+        let (ab, bc, ca) = (ab.mag(), bc.mag(), ca.mag());
+        let s = (ab + bc + ca) / 2.;
+        (s * (s - ab) * (s - bc) * (s - ca)).sqrt()
+    }
+
+    pub fn get_barycentric(&self, b0: f64, b1: f64) -> Vec3 {
+        debug_assert!(b0 >= 0. && b0 <= 1.);
+        debug_assert!(b1 >= 0. && b1 <= 1.);
+        let ab = (self.b - self.a).norm();
+        let ac = (self.c - self.a).norm();
+        ab * b0 + ac * b1
+    }
+
+    pub fn sample(&self) -> (Vec3, Vec3, f64) {
+        let b0 = 1. - random::<f64>().sqrt();
+        let b1 = (1. - b0) * random::<f64>();
+        let pos = self.get_barycentric(b0, b1);
+        (pos, self.normal(), 1. / self.area())
+    }
+
     pub fn intersect(&self, ray: &Ray) -> Option<Hit> {
         // Moller-Trumbore ray intersection algorithm.
         let n = self.normal();
@@ -204,16 +266,16 @@ impl Triangle {
             return None;
         }
 
-        let e1 = self.b - self.a;
-        let e2 = self.c - self.a;
+        let ab = self.b - self.a;
+        let ac = self.c - self.a;
         let b = ray.pos - self.a;
 
-        let det = determinant3(&-ray.dir, &e1, &e2);
+        let det = determinant3(&-ray.dir, &ab, &ac);
 
         // TODO: Inline for better perf?
-        let t = determinant3(&b, &e1, &e2) / det;
-        let u = determinant3(&-ray.dir, &b, &e2) / det;
-        let v = determinant3(&-ray.dir, &e1, &b) / det;
+        let t = determinant3(&b, &ab, &ac) / det;
+        let u = determinant3(&-ray.dir, &b, &ac) / det;
+        let v = determinant3(&-ray.dir, &ab, &b) / det;
 
         if u < 0. || u > 1. || v < 0. || u + v > 1. {
             return None;
@@ -295,14 +357,12 @@ pub enum MeshLoadError {
 }
 
 fn parse_int(s: &str) -> Result<usize, MeshLoadError> {
-    s
-        .parse::<usize>()
+    s.parse::<usize>()
         .map_err(|e| MeshLoadError::Parse(format!("Ill-formed integer {s}: {e}")))
 }
 
 fn parse_float(s: &str) -> Result<f64, MeshLoadError> {
-    s
-        .parse::<f64>()
+    s.parse::<f64>()
         .map_err(|e| MeshLoadError::Parse(format!("Ill-formed float {s}: {e}")))
 }
 
@@ -311,7 +371,10 @@ fn parse_face(s: &str) -> Result<(usize, Option<usize>, Option<usize>), MeshLoad
     let i0 = if let Some(tok) = tokens.next() {
         parse_int(tok)?
     } else {
-        return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+        return Err(MeshLoadError::IO(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of file",
+        )));
     };
     let i1 = if let Some(tok) = tokens.next() {
         Some(parse_int(tok)?)
@@ -330,7 +393,10 @@ fn take_int<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<usize, MeshLo
     if let Some(token) = it.next() {
         parse_int(token)
     } else {
-        Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+        Err(MeshLoadError::IO(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of file",
+        )))
     }
 }
 
@@ -338,31 +404,34 @@ fn take_float<'a, I: Iterator<Item = &'a str>>(it: &mut I) -> Result<f64, MeshLo
     if let Some(token) = it.next() {
         parse_float(token)
     } else {
-        Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")))
+        Err(MeshLoadError::IO(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "unexpected end of file",
+        )))
     }
 }
 
 impl Mesh {
     pub fn new(vertices: Vec<Vec3>, normals: Vec<Vec3>, indices: Vec<usize>) -> Self {
-        let mut triangles: Vec<(usize, Triangle)> = Vec::new();
-        let mut i = 0;
-        while i < indices.len() {
-            triangles.push((
-                i / 3,
+        let surface_areas = (0..indices.len())
+            .step_by(3)
+            .map(|i| {
                 Triangle {
                     a: vertices[indices[i]],
                     b: vertices[indices[i + 1]],
                     c: vertices[indices[i + 2]],
-                },
-            ));
-            i += 3;
-        }
+                }
+                .area()
+            })
+            .collect::<Vec<f64>>();
         Self {
             bounding_box: BoundingBox::enclose(&vertices),
             vertices,
             normals,
             indices,
+            surface_area: surface_areas.iter().sum(),
             octree: None,
+            triangle_selector: WeightedIndex::new(surface_areas).expect("could not build index"),
         }
     }
 
@@ -391,17 +460,26 @@ impl Mesh {
                         let (i0, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "unexpected end of file",
+                            )));
                         };
                         let (i1, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "unexpected end of file",
+                            )));
                         };
                         let (i2, _, _) = if let Some(tok) = tokens.next() {
                             parse_face(tok)?
                         } else {
-                            return Err(MeshLoadError::IO(io::Error::new(io::ErrorKind::UnexpectedEof, "unexpected end of file")));
+                            return Err(MeshLoadError::IO(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "unexpected end of file",
+                            )));
                         };
                         indices.push(i0 - 1);
                         indices.push(i1 - 1);
@@ -412,11 +490,7 @@ impl Mesh {
             }
         }
         // Ok(Self::new(vertices, normals, indices))
-        Ok(Self::new(
-            vertices,
-            normals,
-            indices,
-        ))
+        Ok(Self::new(vertices, normals, indices))
     }
 
     pub fn accelerate(&mut self) {
@@ -538,7 +612,7 @@ impl BoundingBox {
         }
         Self { min, max }
     }
-    
+
     fn _overlaps(&self, b: &Self) -> bool {
         self.min.x <= b.max.x
             && self.max.x >= b.min.x

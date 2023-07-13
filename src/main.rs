@@ -1,14 +1,13 @@
 #[allow(dead_code)]
 use std::env::args;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, self};
+use std::io::{BufReader, BufWriter, Read, Write, self};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
 use pixels::{Pixels, SurfaceTexture};
 use rand::random;
-use rayon::prelude::*;
 use serde::Deserialize;
 use winit::{
     dpi::LogicalSize,
@@ -20,7 +19,6 @@ use winit_input_helper::WinitInputHelper;
 
 mod config;
 mod geometry;
-mod ppm;
 mod scene;
 mod util;
 mod vec3;
@@ -47,75 +45,92 @@ fn render(
     let num_samples = samples_per_pixel / 4;
     let pixels_rendered = Arc::new(Mutex::new(0u64));
 
-    (0..height).into_par_iter().for_each(move |y| {
-        let y = height - y - 1;
-        for x in 0..width {
-            let mut pixel = Vec3::zero();
-            for sy in 0..2 {
-                for sx in 0..2 {
-                    let mut rad = Vec3::zero();
-                    for _ in 0..num_samples {
-                        let r1 = 2. * random::<f64>();
-                        let dx = if r1 < 1. {
-                            r1.sqrt() - 1.
-                        } else {
-                            1. - (2. - r1).sqrt()
-                        };
+    let parallelism = thread::available_parallelism().expect("could not query number of cores").into();
+    thread::scope(|s| {
+        for i in 0..parallelism {
+            let pixels_rendered = Arc::clone(&pixels_rendered);
+            let buffer = Arc::clone(&buffer);
+            s.spawn(move || {
+                let min_y = height * i / parallelism;
+                let max_y = height * (i + 1) / parallelism;
+                for y in min_y..max_y {
+                    let y = height - y - 1;
+                    for x in 0..width {
+                        let mut pixel = Vec3::zero();
+                        for sy in 0..2 {
+                            for sx in 0..2 {
+                                let mut rad = Vec3::zero();
+                                for _ in 0..num_samples {
+                                    let r1 = 2. * random::<f64>();
+                                    let dx = if r1 < 1. {
+                                        r1.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r1).sqrt()
+                                    };
 
-                        let r2 = 2. * random::<f64>();
-                        let dy = if r2 < 1. {
-                            r2.sqrt() - 1.
-                        } else {
-                            1. - (2. - r2).sqrt()
-                        };
+                                    let r2 = 2. * random::<f64>();
+                                    let dy = if r2 < 1. {
+                                        r2.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r2).sqrt()
+                                    };
 
-                        let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
-                            + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
-                            + scene.camera.dir;
+                                    let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                        + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                        + scene.camera.dir;
 
-                        rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
-                            * (1. / num_samples as f64);
+                                    rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                                        * (1. / num_samples as f64);
+                                }
+                                pixel += rad.clamp(0., 1.) * 0.25;
+                            }
+                        }
+                        pixel = gamma_correct(&pixel);
+
+                        {
+                            let y = height - y - 1;
+                            let mut buffer = buffer.write().unwrap();
+                            let i = y * width + x;
+                            buffer[4 * i] = pixel.x as u8;
+                            buffer[4 * i + 1] = pixel.y as u8;
+                            buffer[4 * i + 2] = pixel.z as u8;
+                            buffer[4 * i + 3] = 255;
+                        }
+
+                        {
+                            let mut pixels_rendered = pixels_rendered.lock().unwrap();
+                            *pixels_rendered += 1;
+                            print!(
+                                "\rRendering at {samples_per_pixel} spp ({:.1}%)",
+                                *pixels_rendered as f64 / (w * h) * 100.
+                            );
+                        }
                     }
-                    pixel += rad.clamp(0., 1.) * 0.25;
                 }
-            }
-            pixel = gamma_correct(&pixel);
-
-            {
-                let y = height - y - 1;
-                let mut buffer = buffer.write().unwrap();
-                buffer[4 * (y * width + x)] = pixel.x as u8;
-                buffer[4 * (y * width + x) + 1] = pixel.y as u8;
-                buffer[4 * (y * width + x) + 2] = pixel.z as u8;
-                buffer[4 * (y * width + x) + 3] = 255;
-            }
-
-            {
-                let mut pixels_rendered = pixels_rendered.lock().unwrap();
-                *pixels_rendered += 1;
-                print!(
-                    "\rRendering at {samples_per_pixel} spp ({:.1}%)",
-                    *pixels_rendered as f64 / (w * h) * 100.
-                );
-            }
+            });
         }
     });
     print!("\n");
 }
 
-fn dump_to_image(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) {
+fn dump_to_image(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) -> io::Result<()> {
     let Config { width, height, samples_per_pixel, .. } = *config;
-    let mut img = ppm::Image::new(width, height);
     render(scene, width, height, samples_per_pixel, Arc::clone(&buffer));
-    for y in 0..height {
-        for x in 0..width {
-            let buffer = buffer.read().unwrap();
-            let i = 4 * (y * width + x);
-            img.set(y, x, &buffer[i..i + 3]);
+    
+    let mut f = BufWriter::new(File::create("image.ppm").expect("ruh roh"));
+    let buffer = buffer.read().unwrap();
+    
+    writeln!(f, "P3")?;
+    writeln!(f, "{} {}", width, height)?;
+    writeln!(f, "255")?;
+    for r in 0..height {
+        for c in 0..width {
+            let i = 3 * (r * width + c);
+            write!(f, "{} {} {} ", buffer[i], buffer[i + 1], buffer[i + 2])?;
         }
     }
-    let mut f = BufWriter::new(File::create("image.ppm").expect("ruh roh"));
-    img.dump(&mut f).expect("failed to dump to file");
+
+    Ok(())
 }
 
 fn render_to_window(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) {
@@ -295,18 +310,17 @@ fn main() {
     if config.render_targets == vec![Target::Window, Target::Image] ||
         config.render_targets == vec![Target::Image, Target::Window] {
         render_to_window(&config, &scene, Arc::clone(&buffer));
-        dump_to_image(&config, &scene, buffer);
+        dump_to_image(&config, &scene, buffer).expect("couldn't dump to image");
     } else if let Some(Target::Window) = config.render_targets.get(0) {
-        render_to_window(&config, &scene, Arc::clone(&buffer));
+        render_to_window(&config, &scene, buffer);
     } else if let Some(Target::Image) = config.render_targets.get(0) {
         thread::scope(|s| {
-            let handle = s.spawn(|| {
+            s.spawn(|| {
                 render(&scene, config.width, config.height, config.samples_per_pixel,
                     Arc::clone(&buffer));
             });
-            handle.join().unwrap();
-            dump_to_image(&config, &scene, Arc::clone(&buffer));
         });
+        dump_to_image(&config, &scene, buffer).expect("couldn't dump to image");
     } else {
         unimplemented!("no bitches");
     }

@@ -144,7 +144,7 @@ impl Scene {
         let mut document = String::new();
         r.read_to_string(&mut document).map_err(E::Io)?;
         let spec: SceneSpec = toml::from_str(&document).map_err(E::Parse)?;
-        spec.load().map_err(E::MeshLoad)
+        spec.to_scene().map_err(E::MeshLoad)
     }
 
     pub fn received_radiance(&self, r: &Ray) -> Vec3 {
@@ -241,22 +241,7 @@ impl Scene {
     }
 
     fn sample_light_source(&self) -> (Vec3, Vec3, f64) {
-        match self.objects[self.light_source].geometry {
-            Geometry::Sphere(Sphere { pos: center, r }) => {
-                let xi1 = random::<f64>();
-                let xi2 = random::<f64>();
-
-                let z = 2. * xi1 - 1.;
-                let x = (1.0 - z * z).sqrt() * (2. * PI * xi2).cos();
-                let y = (1.0 - z * z).sqrt() * (2. * PI * xi2).sin();
-
-                let n = Vec3::new(x, y, z).norm();
-                let sample = center + n * r;
-                let pdf = 1.0 / (4.0 * PI * r * r);
-                (sample, n, pdf)
-            }
-            _ => unimplemented!(),
-        }
+        self.objects[self.light_source].geometry.sample()
     }
 
     fn indicate_visibility(&self, x: &Vec3, y: &Vec3) -> f64 {
@@ -340,9 +325,11 @@ pub enum BRDFSpec {
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GeometrySpec {
     Sphere { pos: [f64; 3], r: f64 },
+    Cube { pos: [f64; 3], size: f64 },
+    Prism { pos: [f64; 3], size: [f64; 3] },
     Plane { pos: [f64; 3], n: [f64; 3] },
     Mesh { path: String },
 }
@@ -364,7 +351,7 @@ pub enum LoadTomlError {
 }
 
 impl SceneSpec {
-    pub fn load(self) -> Result<Scene, MeshLoadError> {
+    pub fn to_scene(self) -> Result<Scene, MeshLoadError> {
         let camera = Ray {
             pos: self.camera.pos.into(),
             dir: self.camera.dir.into(),
@@ -397,6 +384,14 @@ impl SceneSpec {
                         let mut geom = match spec.geometry {
                             GeometrySpec::Sphere { pos, r } => {
                                 Geometry::Sphere(Sphere { pos: pos.into(), r })
+                            }
+                            GeometrySpec::Cube { pos, size } => {
+                                let cube = Mesh::cube(&pos.into(), size);
+                                println!("Cube surface area: {}", cube.surface_area);
+                                Geometry::Mesh(cube)
+                            }
+                            GeometrySpec::Prism { pos, size } => {
+                                Geometry::Mesh(Mesh::prism(&pos.into(), size[0], size[1], size[2]))
                             }
                             GeometrySpec::Plane { pos, n } => Geometry::Plane(Plane {
                                 pos: pos.into(),
