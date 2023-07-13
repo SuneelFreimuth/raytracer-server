@@ -1,11 +1,14 @@
 #[allow(dead_code)]
 use std::env::args;
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write, self};
+use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
 
+use image::codecs::png::PngEncoder;
+use image::ColorType;
+use image::ImageEncoder;
 use pixels::{Pixels, SurfaceTexture};
 use rand::random;
 use serde::Deserialize;
@@ -45,7 +48,9 @@ fn render(
     let num_samples = samples_per_pixel / 4;
     let pixels_rendered = Arc::new(Mutex::new(0u64));
 
-    let parallelism = thread::available_parallelism().expect("could not query number of cores").into();
+    let parallelism = thread::available_parallelism()
+        .expect("could not query number of cores")
+        .into();
     thread::scope(|s| {
         for i in 0..parallelism {
             let pixels_rendered = Arc::clone(&pixels_rendered);
@@ -75,11 +80,13 @@ fn render(
                                         1. - (2. - r2).sqrt()
                                     };
 
-                                    let d = cx * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                    let d = cx
+                                        * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
                                         + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
                                         + scene.camera.dir;
 
-                                    rad += scene.received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                                    rad += scene
+                                        .received_radiance(&Ray::new(scene.camera.pos, d.norm()))
                                         * (1. / num_samples as f64);
                                 }
                                 pixel += rad.clamp(0., 1.) * 0.25;
@@ -113,28 +120,32 @@ fn render(
     print!("\n");
 }
 
-fn dump_to_image(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) -> io::Result<()> {
-    let Config { width, height, samples_per_pixel, .. } = *config;
-    render(scene, width, height, samples_per_pixel, Arc::clone(&buffer));
-    
-    let mut f = BufWriter::new(File::create("image.ppm").expect("ruh roh"));
+fn dump_to_image(config: &Config, buffer: Arc<RwLock<Vec<u8>>>) -> io::Result<()> {
+    let Config { width, height, .. } = *config;
+
+    let f = BufWriter::new(File::create("image.png").expect("ruh roh"));
+    let encoder = PngEncoder::new(f);
     let buffer = buffer.read().unwrap();
-    
-    writeln!(f, "P3")?;
-    writeln!(f, "{} {}", width, height)?;
-    writeln!(f, "255")?;
-    for r in 0..height {
-        for c in 0..width {
-            let i = 3 * (r * width + c);
-            write!(f, "{} {} {} ", buffer[i], buffer[i + 1], buffer[i + 2])?;
-        }
-    }
+
+    encoder
+        .write_image(
+            buffer.as_slice(),
+            width as u32,
+            height as u32,
+            ColorType::Rgba8,
+        )
+        .expect("could not write image");
 
     Ok(())
 }
 
 fn render_to_window(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) {
-    let Config { width, height, samples_per_pixel, .. } = *config;
+    let Config {
+        width,
+        height,
+        samples_per_pixel,
+        ..
+    } = *config;
     let event_loop = EventLoop::new();
     let mut input = WinitInputHelper::new();
     let window = {
@@ -149,28 +160,19 @@ fn render_to_window(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>
 
     let window_size = window.inner_size();
     let mut pixels = {
-        let surface_texture =
-            SurfaceTexture::new(window_size.width, window_size.height, &window);
+        let surface_texture = SurfaceTexture::new(window_size.width, window_size.height, &window);
         Pixels::new(width as u32, height as u32, surface_texture)
             .expect("could not create pixel buffer")
     };
 
     thread::scope(|s| {
-        {
-            let buf_ref = Arc::clone(&buffer);
-            s.spawn(move || {
-                let now = Instant::now();
-                render(
-                    scene,
-                    width,
-                    height,
-                    samples_per_pixel,
-                    buf_ref,
-                );
-                let elapsed = now.elapsed();
-                println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
-            });
-        }
+        let buf_ref = Arc::clone(&buffer);
+        s.spawn(move || {
+            let now = Instant::now();
+            render(scene, width, height, samples_per_pixel, buf_ref);
+            let elapsed = now.elapsed();
+            println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
+        });
 
         event_loop.run(move |event, _, control_flow| {
             if let Event::RedrawRequested(_) = event {
@@ -210,7 +212,7 @@ struct Config {
 
 enum ConfigLoadError {
     Io(io::Error),
-    Toml(toml::de::Error)
+    Toml(toml::de::Error),
 }
 
 impl Config {
@@ -259,7 +261,8 @@ impl Config {
 
     pub fn from_toml<R: Read>(r: &mut R) -> Result<Self, ConfigLoadError> {
         let mut document = String::new();
-        r.read_to_string(&mut document).map_err(ConfigLoadError::Io)?;
+        r.read_to_string(&mut document)
+            .map_err(ConfigLoadError::Io)?;
         toml::from_str(&document).map_err(ConfigLoadError::Toml)
     }
 }
@@ -307,21 +310,20 @@ fn main() {
     };
 
     let buffer = Arc::new(RwLock::new(vec![0; 4 * config.width * config.height]));
-    if config.render_targets == vec![Target::Window, Target::Image] ||
-        config.render_targets == vec![Target::Image, Target::Window] {
+    
+    if config.render_targets.contains(&Target::Window) {
         render_to_window(&config, &scene, Arc::clone(&buffer));
-        dump_to_image(&config, &scene, buffer).expect("couldn't dump to image");
-    } else if let Some(Target::Window) = config.render_targets.get(0) {
-        render_to_window(&config, &scene, buffer);
-    } else if let Some(Target::Image) = config.render_targets.get(0) {
-        thread::scope(|s| {
-            s.spawn(|| {
-                render(&scene, config.width, config.height, config.samples_per_pixel,
-                    Arc::clone(&buffer));
-            });
-        });
-        dump_to_image(&config, &scene, buffer).expect("couldn't dump to image");
     } else {
-        unimplemented!("no bitches");
+        render(
+            &scene,
+            config.width,
+            config.height,
+            config.samples_per_pixel,
+            Arc::clone(&buffer),
+        );
+    }
+
+    if config.render_targets.contains(&Target::Image) {
+        dump_to_image(&config, buffer).expect("couldn't dump to image");
     }
 }

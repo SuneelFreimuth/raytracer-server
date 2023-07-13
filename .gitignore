@@ -1,3 +1,4 @@
 /target
 image.ppm
-flamegraph.svg
+/*.png
+/*.svg
