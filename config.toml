@@ -4,4 +4,4 @@ samples_per_pixel = 4
 scene = "scenes/cornell_box.toml"
 use_mis = true
 # Options: "window", "image"
-render_targets = ["window", "image"]
+show_window = false

@@ -1261,7 +1261,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "raytracer-rs"
+name = "raytracer"
 version = "0.1.0"
 dependencies = [
  "image",

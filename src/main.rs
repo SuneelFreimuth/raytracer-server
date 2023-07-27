@@ -1,7 +1,8 @@
 #[allow(dead_code)]
 use std::env::args;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read, Write};
+use std::io::{self, BufReader, BufWriter, Read};
+use std::process::exit;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Instant;
@@ -20,15 +21,71 @@ use winit::{
 };
 use winit_input_helper::WinitInputHelper;
 
-mod config;
 mod geometry;
 mod scene;
-mod util;
-mod vec3;
+
+use geometry::{Vec3, Ray};
 
 use geometry::MeshLoadError;
 use scene::Scene;
-use vec3::*;
+
+const CONFIG_FILE: &str = "config.toml";
+
+fn main() {
+    let mut config_file = file_open_read(CONFIG_FILE);
+    let mut config = match Config::from_toml(&mut config_file) {
+        Ok(c) => c,
+        Err(err) => {
+            match err {
+                ConfigLoadError::Io(err) => {
+                    eprintln!("I/O error: {err}")
+                }
+                ConfigLoadError::Toml(err) => {
+                    eprintln!("Failed to parse {CONFIG_FILE}: {err}")
+                }
+            }
+            return;
+        }
+    };
+    config.overwrite_from_args(&args().collect());
+
+    let f = File::open(&config.scene).expect("could not open file");
+    let mut scene = match Scene::from_toml(&mut BufReader::new(f)) {
+        Ok(scene) => scene,
+        Err(err) => {
+            match err {
+                scene::LoadTomlError::Io(err)
+                | scene::LoadTomlError::MeshLoad(MeshLoadError::IO(err)) => {
+                    eprintln!("I/O error: {err}")
+                }
+                scene::LoadTomlError::MeshLoad(MeshLoadError::Parse(err)) => {
+                    eprintln!("Failed to load mesh {err}")
+                }
+                scene::LoadTomlError::Parse(err) => eprintln!("Could not parse TOML: {err}"),
+            }
+            return;
+        }
+    };
+    scene.name = config.image_path.clone().unwrap_or(config.scene.clone());
+
+    let buffer = Arc::new(RwLock::new(vec![0; 4 * config.width * config.height]));
+
+    if config.show_window {
+        render_to_window(&config, &scene, Arc::clone(&buffer));
+    } else {
+        render(
+            &scene,
+            config.width,
+            config.height,
+            config.samples_per_pixel,
+            Arc::clone(&buffer),
+        );
+    }
+
+    if config.image_path.is_some() {
+        dump_to_image(&config, buffer);
+    }
+}
 
 fn gamma_correct(v: &Vec3) -> Vec3 {
     v.clamp(0., 1.).powf(1.0 / 2.2) * 255.0 + Vec3::repeat(0.5)
@@ -48,9 +105,10 @@ fn render(
     let num_samples = samples_per_pixel / 4;
     let pixels_rendered = Arc::new(Mutex::new(0u64));
 
-    let parallelism = thread::available_parallelism()
+    let parallelism: usize = thread::available_parallelism()
         .expect("could not query number of cores")
         .into();
+    let start = Instant::now();
     thread::scope(|s| {
         for i in 0..parallelism {
             let pixels_rendered = Arc::clone(&pixels_rendered);
@@ -118,25 +176,50 @@ fn render(
         }
     });
     print!("\n");
+    let duration = Instant::now() - start;
+    println!("Rendered in {:.1} seconds.", duration.as_secs_f64());
 }
 
-fn dump_to_image(config: &Config, buffer: Arc<RwLock<Vec<u8>>>) -> io::Result<()> {
-    let Config { width, height, .. } = *config;
+fn dump_to_image(config: &Config, buffer: Arc<RwLock<Vec<u8>>>) {
+    let Config {
+        width,
+        height,
+        image_path,
+        ..
+    } = config;
 
-    let f = BufWriter::new(File::create("image.png").expect("ruh roh"));
+    let f = file_open_create(image_path.as_ref().unwrap().as_str());
     let encoder = PngEncoder::new(f);
     let buffer = buffer.read().unwrap();
 
     encoder
         .write_image(
             buffer.as_slice(),
-            width as u32,
-            height as u32,
+            *width as u32,
+            *height as u32,
             ColorType::Rgba8,
         )
         .expect("could not write image");
+}
 
-    Ok(())
+fn file_open_create(path: &str) -> BufWriter<File> {
+    match File::create(path) {
+        Ok(f) => BufWriter::new(f),
+        Err(err) => {
+            eprintln!("Could not open {path}: {err}");
+            exit(1);
+        }
+    }
+}
+
+fn file_open_read(path: &str) -> BufReader<File> {
+    match File::open(path) {
+        Ok(f) => BufReader::new(f),
+        Err(err) => {
+            eprintln!("Could not open {path}: {err}");
+            exit(1);
+        }
+    }
 }
 
 fn render_to_window(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>) {
@@ -168,10 +251,7 @@ fn render_to_window(config: &Config, scene: &Scene, buffer: Arc<RwLock<Vec<u8>>>
     thread::scope(|s| {
         let buf_ref = Arc::clone(&buffer);
         s.spawn(move || {
-            let now = Instant::now();
             render(scene, width, height, samples_per_pixel, buf_ref);
-            let elapsed = now.elapsed();
-            println!("Rendered in {:.1} seconds.", elapsed.as_secs_f64());
         });
 
         event_loop.run(move |event, _, control_flow| {
@@ -207,7 +287,8 @@ struct Config {
     height: usize,
     samples_per_pixel: usize,
     scene: String,
-    render_targets: Vec<Target>,
+    show_window: bool,
+    image_path: Option<String>,
 }
 
 enum ConfigLoadError {
@@ -222,7 +303,8 @@ impl Config {
             height: 360,
             samples_per_pixel: 4,
             scene: String::new(),
-            render_targets: vec![Target::Window],
+            show_window: false,
+            image_path: None,
         }
     }
 
@@ -244,15 +326,11 @@ impl Config {
                 "-h" | "--height" => {
                     self.height = args[i + 1].parse::<usize>().unwrap();
                 }
-                "--render-to" => {
-                    self.render_targets = args[i + 1]
-                        .split(",")
-                        .filter_map(|t| match t {
-                            "image" => Some(Target::Image),
-                            "window" => Some(Target::Window),
-                            _ => None,
-                        })
-                        .collect();
+                "--window" => {
+                    self.show_window = true;
+                }
+                "--image" => {
+                    self.image_path = Some(args[i + 1].to_string());
                 }
                 _ => {}
             }
@@ -264,66 +342,5 @@ impl Config {
         r.read_to_string(&mut document)
             .map_err(ConfigLoadError::Io)?;
         toml::from_str(&document).map_err(ConfigLoadError::Toml)
-    }
-}
-
-const CONFIG_FILE: &str = "config.toml";
-
-fn main() {
-    let args = args().collect();
-    let mut config_file = {
-        let f = File::open(CONFIG_FILE).expect("could not find config.toml");
-        BufReader::new(f)
-    };
-    let mut config = match Config::from_toml(&mut config_file) {
-        Ok(c) => c,
-        Err(err) => {
-            match err {
-                ConfigLoadError::Io(err) => {
-                    eprintln!("I/O error: {err}")
-                }
-                ConfigLoadError::Toml(err) => {
-                    eprintln!("Failed to parse {CONFIG_FILE}: {err}")
-                }
-            }
-            return;
-        }
-    };
-    config.overwrite_from_args(&args);
-
-    let f = File::open(&config.scene).expect("could not open file");
-    let scene = match Scene::from_toml(&mut BufReader::new(f)) {
-        Ok(scene) => scene,
-        Err(err) => {
-            match err {
-                scene::LoadTomlError::Io(err)
-                | scene::LoadTomlError::MeshLoad(MeshLoadError::IO(err)) => {
-                    eprintln!("I/O error: {err}")
-                }
-                scene::LoadTomlError::MeshLoad(MeshLoadError::Parse(err)) => {
-                    eprintln!("Failed to load mesh {err}")
-                }
-                scene::LoadTomlError::Parse(err) => eprintln!("Could not parse TOML: {err}"),
-            }
-            return;
-        }
-    };
-
-    let buffer = Arc::new(RwLock::new(vec![0; 4 * config.width * config.height]));
-    
-    if config.render_targets.contains(&Target::Window) {
-        render_to_window(&config, &scene, Arc::clone(&buffer));
-    } else {
-        render(
-            &scene,
-            config.width,
-            config.height,
-            config.samples_per_pixel,
-            Arc::clone(&buffer),
-        );
-    }
-
-    if config.render_targets.contains(&Target::Image) {
-        dump_to_image(&config, buffer).expect("couldn't dump to image");
     }
 }

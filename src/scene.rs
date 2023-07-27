@@ -5,9 +5,7 @@ use std::io::{self, Read, BufReader};
 use rand::random;
 use serde::Deserialize;
 
-use crate::geometry::{Geometry, Sphere, Plane, Mesh, Hit, MeshLoadError};
-use crate::vec3::{Vec3, Ray};
-use crate::config::USE_MIS;
+use crate::geometry::{Geometry, Sphere, Plane, Mesh, Hit, MeshLoadError, Vec3, Ray};
 
 #[derive(Clone, Debug)]
 pub struct Object {
@@ -101,6 +99,7 @@ impl BRDF {
 }
 
 pub struct Scene {
+    pub name: String,
     pub camera: Ray,
     pub objects: Vec<Object>,
     pub light_source: usize,
@@ -125,12 +124,14 @@ pub fn create_local_coord(n: &Vec3) -> (Vec3, Vec3, Vec3) {
 impl Scene {
     pub fn new(camera: Ray, objects: Vec<Object>) -> Self {
         Self {
+            name: String::new(),
             light_source: 'find_source: {
                 for (i, obj) in objects.iter().enumerate() {
                     if !obj.emitted.equal_within(&Vec3::zero(), 0.00001) {
                         break 'find_source i;
                     }
                 }
+                // TODO: not unreachable lol
                 unreachable!();
             },
             camera,
@@ -182,7 +183,8 @@ impl Scene {
 
             rad
         } else {
-            let mut rad = if USE_MIS {
+            // TODO: Do multiple importance sampling properly
+            let mut rad = if false {
                 let mut rad_direct = Vec3::zero();
 
                 let (y, ny, mut pdf_light) = self.sample_light_source();
@@ -387,7 +389,6 @@ impl SceneSpec {
                             }
                             GeometrySpec::Cube { pos, size } => {
                                 let cube = Mesh::cube(&pos.into(), size);
-                                println!("Cube surface area: {}", cube.surface_area);
                                 Geometry::Mesh(cube)
                             }
                             GeometrySpec::Prism { pos, size } => {
