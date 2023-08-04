@@ -346,6 +346,7 @@ pub enum TransformSpec {
     RotateZ(f64),
 }
 
+#[derive(Debug)]
 pub enum LoadTomlError {
     Io(io::Error),
     Parse(toml::de::Error),

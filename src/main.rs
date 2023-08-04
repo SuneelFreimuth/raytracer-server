@@ -1,18 +1,24 @@
+use std::collections::{hash_map, HashMap, HashSet};
 #[allow(dead_code)]
 use std::env::args;
 use std::fs::File;
-use std::io::{self, BufReader, BufWriter, Read};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
+use std::ops::Deref;
 use std::process::exit;
-use std::sync::{Arc, Mutex, RwLock};
-use std::thread;
-use std::time::Instant;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
+use std::thread::{self, sleep, Scope, ScopedJoinHandle};
+use std::time::{Duration, Instant};
 
 use image::codecs::png::PngEncoder;
 use image::ColorType;
 use image::ImageEncoder;
 use pixels::{Pixels, SurfaceTexture};
 use rand::random;
+use rand::seq::{IteratorRandom, SliceRandom};
 use serde::Deserialize;
+use tokio_tungstenite::WebSocketStream;
+use tokio_util::sync::CancellationToken;
 use winit::{
     dpi::LogicalSize,
     event::Event,
@@ -20,75 +26,250 @@ use winit::{
     window::WindowBuilder,
 };
 use winit_input_helper::WinitInputHelper;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use futures_util::{stream::TryStreamExt, StreamExt};
+use futures::lock::Mutex as AsyncMutex;
+
+use byteorder::{LittleEndian, WriteBytesExt};
 
 mod geometry;
+use geometry::{Ray, Vec3};
+
 mod scene;
-
-use geometry::{Vec3, Ray};
-
-use geometry::MeshLoadError;
 use scene::Scene;
+
+use std::net::{TcpStream};
+use std::thread::spawn;
+use tungstenite::{accept, Error, Message, WebSocket};
 
 const CONFIG_FILE: &str = "config.toml";
 
-fn main() {
-    let mut config_file = file_open_read(CONFIG_FILE);
-    let mut config = match Config::from_toml(&mut config_file) {
-        Ok(c) => c,
-        Err(err) => {
-            match err {
-                ConfigLoadError::Io(err) => {
-                    eprintln!("I/O error: {err}")
+const PORT: &str = "8080";
+
+const WIDTH: usize = 600;
+const HEIGHT: usize = 450;
+
+#[tokio::main]
+async fn main() {
+    let server = TcpListener::bind(format!("127.0.0.1:{PORT}")).await.unwrap();
+
+    let scenes = Arc::new(HashMap::from([
+        ("cornell_box", {
+            let mut f = BufReader::new(File::open("scenes/cornell_box.toml").unwrap());
+            Scene::from_toml(&mut f).unwrap()
+        }),
+        ("cubes", {
+            let mut f = BufReader::new(File::open("scenes/cubes.toml").unwrap());
+            Scene::from_toml(&mut f).unwrap()
+        }),
+        ("flying_unicorn", {
+            let mut f = BufReader::new(File::open("scenes/flying_unicorn.toml").unwrap());
+            Scene::from_toml(&mut f).unwrap()
+        }),
+    ]));
+
+    let connections = Arc::new(RwLock::new(HashSet::<String>::new()));
+
+    while let Ok((stream, addr)) = server.accept().await {
+        let id = unique_connection_id(connections.read().unwrap().deref());
+        let scenes = scenes.as_ref();
+        let websocket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        handle_connection(&id, &scenes, websocket).await;
+        connections.write().unwrap().remove(&id);
+        connections.write().unwrap().insert(id.clone());
+    }
+}
+
+fn unique_connection_id(connections: &HashSet<String>) -> String {
+    const ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz";
+    loop {
+        let id: String = ALPHABET
+            .chars()
+            .choose_multiple(&mut rand::thread_rng(), 6)
+            .into_iter()
+            .collect();
+        if !connections.contains(&id) {
+            return id;
+        }
+    }
+}
+
+async fn handle_connection(
+    id: &String,
+    scenes: &HashMap<&str, Scene>,
+    websocket: WebSocketStream<TcpStream>,
+) {
+    println!("[{id}] Accepted connection.");
+    let (outgoing, incoming) = websocket.split();
+    
+    let token = CancellationToken::new();
+
+    loop {
+        let msg = {
+            let mut websocket = websocket.lock().unwrap();
+            match websocket {
+                Ok(msg) => msg,
+                Err(Error::ConnectionClosed) => {
+                    println!("[{id}] Connection closed.");
+                    break;
                 }
-                ConfigLoadError::Toml(err) => {
-                    eprintln!("Failed to parse {CONFIG_FILE}: {err}")
+                Err(err) => {
+                    println!("[{id}] Unexpected error reading message: {err}");
+                    break;
                 }
             }
-            return;
-        }
-    };
-    config.overwrite_from_args(&args().collect());
+        };
 
-    let f = File::open(&config.scene).expect("could not open file");
-    let mut scene = match Scene::from_toml(&mut BufReader::new(f)) {
-        Ok(scene) => scene,
-        Err(err) => {
-            match err {
-                scene::LoadTomlError::Io(err)
-                | scene::LoadTomlError::MeshLoad(MeshLoadError::IO(err)) => {
-                    eprintln!("I/O error: {err}")
+        println!("[{id}] New message: '{msg}'");
+
+        if let Message::Text(text) = msg {
+            let msg: ClientMessage =
+                serde_json::from_str(text.as_str()).expect("failed to parse message");
+            match msg {
+                ClientMessage::Render { scene } => {
+                    let token = token.clone();
+                    tokio::spawn(async move {
+                        println!("[{id}] Rendering...");
+                        render_to_websocket(
+                            scenes.get(scene.as_str()).unwrap(),
+                            WIDTH,
+                            HEIGHT,
+                            16,
+                            &websocket,
+                            token,
+                        );
+                        println!("[{id}] Done rendering.");
+                        lock_and_use(&websocket, |mut websocket| {
+                            websocket.send(Message::Binary(vec![1]));
+                        });
+                    });
                 }
-                scene::LoadTomlError::MeshLoad(MeshLoadError::Parse(err)) => {
-                    eprintln!("Failed to load mesh {err}")
+                ClientMessage::StopRendering => {
+                    token.cancel();
                 }
-                scene::LoadTomlError::Parse(err) => eprintln!("Could not parse TOML: {err}"),
             }
-            return;
         }
-    };
-    scene.name = config.image_path.clone().unwrap_or(config.scene.clone());
-
-    let buffer = Arc::new(RwLock::new(vec![0; 4 * config.width * config.height]));
-
-    if config.show_window {
-        render_to_window(&config, &scene, Arc::clone(&buffer));
-    } else {
-        render(
-            &scene,
-            config.width,
-            config.height,
-            config.samples_per_pixel,
-            Arc::clone(&buffer),
-        );
     }
+}
 
-    if config.image_path.is_some() {
-        dump_to_image(&config, buffer);
-    }
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum ClientMessage {
+    Render { scene: String },
+    StopRendering,
+}
+
+fn lock_and_use<T: ?Sized, R, F>(m: &Mutex<T>, f: F) -> R
+where
+    F: Fn(MutexGuard<'_, T>) -> R,
+{
+    let lock = m.lock().unwrap();
+    f(lock)
 }
 
 fn gamma_correct(v: &Vec3) -> Vec3 {
     v.clamp(0., 1.).powf(1.0 / 2.2) * 255.0 + Vec3::repeat(0.5)
+}
+
+fn render_to_websocket(
+    scene: &Scene,
+    width: usize,
+    height: usize,
+    samples_per_pixel: usize,
+    websocket: &Arc<Mutex<WebSocket<TcpStream>>>,
+    token: CancellationToken
+) {
+    let w = width as f64;
+    let h = height as f64;
+    let cx = Vec3::new(w * 0.5135 / h, 0., 0.);
+    let cy = cx.cross(&scene.camera.dir).norm() * 0.5135;
+    let num_samples = samples_per_pixel / 4;
+    let pixels_rendered = Arc::new(Mutex::new(0u64));
+
+    let parallelism: usize = thread::available_parallelism()
+        .expect("could not query number of cores")
+        .into();
+    let start = Instant::now();
+    thread::scope(|s| {
+        for i in 0..parallelism {
+            let websocket = websocket.clone();
+            let pixels_rendered = Arc::clone(&pixels_rendered);
+            let token = token.clone();
+            s.spawn(move || {
+                let min_y = height * i / parallelism;
+                let max_y = height * (i + 1) / parallelism;
+                for y in min_y..max_y {
+                    let y = height - y - 1;
+                    for x in 0..width {
+                        if token.is_cancelled() {
+                            return;
+                        }
+                        let mut pixel = Vec3::zero();
+                        for sy in 0..2 {
+                            for sx in 0..2 {
+                                let mut rad = Vec3::zero();
+                                for _ in 0..num_samples {
+                                    let r1 = 2. * random::<f64>();
+                                    let dx = if r1 < 1. {
+                                        r1.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r1).sqrt()
+                                    };
+
+                                    let r2 = 2. * random::<f64>();
+                                    let dy = if r2 < 1. {
+                                        r2.sqrt() - 1.
+                                    } else {
+                                        1. - (2. - r2).sqrt()
+                                    };
+
+                                    let d = cx
+                                        * (((sx as f64 + 0.5 + dx) / 2. + x as f64) / w - 0.5)
+                                        + cy * (((sy as f64 + 0.5 + dy) / 2. + y as f64) / h - 0.5)
+                                        + scene.camera.dir;
+
+                                    rad += scene
+                                        .received_radiance(&Ray::new(scene.camera.pos, d.norm()))
+                                        * (1. / num_samples as f64);
+                                }
+                                pixel += rad.clamp(0., 1.) * 0.25;
+                            }
+                        }
+                        pixel = gamma_correct(&pixel);
+
+                        let Vec3 { x: r, y: g, z: b } = pixel;
+
+                        lock_and_use(&websocket, |mut websocket| {
+                            let y = height - y - 1;
+                            // websocket.write(message("pixel", &format!("{x},{y},{r},{g},{b}")));
+                            let mut msg: Vec<u8> = Vec::with_capacity(8);
+                            msg.push(0);
+                            msg.write_u16::<LittleEndian>(x as u16).unwrap();
+                            msg.write_u16::<LittleEndian>(y as u16).unwrap();
+                            msg.push(r as u8);
+                            msg.push(g as u8);
+                            msg.push(b as u8);
+                            websocket.write(Message::Binary(msg));
+                        });
+
+                        {
+                            let mut pixels_rendered = pixels_rendered.lock().unwrap();
+                            *pixels_rendered += 1;
+                            print!(
+                                "\rRendering at {samples_per_pixel} spp ({:.1}%)",
+                                *pixels_rendered as f64 / (w * h) * 100.
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    });
+    lock_and_use(&websocket, |mut w| w.flush().unwrap());
+    print!("\n");
+    let duration = Instant::now() - start;
+    println!("Rendered in {:.1} seconds.", duration.as_secs_f64());
 }
 
 fn render(
@@ -162,14 +343,13 @@ fn render(
                             buffer[4 * i + 3] = 255;
                         }
 
-                        {
-                            let mut pixels_rendered = pixels_rendered.lock().unwrap();
+                        lock_and_use(&pixels_rendered, |mut pixels_rendered| {
                             *pixels_rendered += 1;
                             print!(
                                 "\rRendering at {samples_per_pixel} spp ({:.1}%)",
                                 *pixels_rendered as f64 / (w * h) * 100.
                             );
-                        }
+                        });
                     }
                 }
             });
