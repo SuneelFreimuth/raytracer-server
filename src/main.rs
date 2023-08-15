@@ -30,24 +30,8 @@ use scene::{LoadTomlError, Scene};
 use tungstenite::error::ProtocolError;
 
 const PORT: &str = "8080";
-
 const WIDTH: usize = 600;
 const HEIGHT: usize = 450;
-
-fn list_dir<F>(f: F)
-where
-    F: AsRef<std::path::Path>,
-{
-    let mut entries = std::fs::read_dir(f)
-        .unwrap()
-        .map(|entry| entry.unwrap())
-        .collect::<Vec<std::fs::DirEntry>>();
-    entries.sort_by(|a, b| a.file_name().partial_cmp(&b.file_name()).unwrap());
-    for f in entries {
-        println!("{:?}", f);
-    }
-}
-
 const SCENE_NAMES: [&str; 3] = ["cornell_box", "cubes", "flying_unicorn"];
 
 #[tokio::main]
