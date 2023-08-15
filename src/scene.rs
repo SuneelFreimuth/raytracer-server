@@ -98,6 +98,7 @@ impl BRDF {
     }
 }
 
+#[derive(Clone)]
 pub struct Scene {
     pub name: String,
     pub camera: Ray,
@@ -400,7 +401,9 @@ impl SceneSpec {
                                 n: n.into(),
                             }),
                             GeometrySpec::Mesh { path } => {
-                                let f = File::open(path).map_err(MeshLoadError::IO)?;
+                                // TODO: Bad, do not do.
+                                let scene_dir: String = std::env::args().nth(1).unwrap();
+                                let f = File::open(format!("{scene_dir}/assets/{path}")).map_err(MeshLoadError::IO)?;
                                 let r = BufReader::new(f);
                                 Geometry::Mesh(Mesh::load(r)?)
                             }

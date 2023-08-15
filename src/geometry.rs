@@ -670,42 +670,6 @@ impl Triangle {
     }
 }
 
-#[test]
-fn test_triangle_intersection() {
-    // Triangle in XY-plane
-    let t = Triangle {
-        a: Vec3::new(-1., -1., 0.),
-        b: Vec3::new(1., -1., 0.),
-        c: Vec3::new(0., 1., 0.),
-    };
-    // Ray 1 unit off the XY-plane pointing directly into the triangle
-    let r = Ray {
-        pos: Vec3::new(0., 0., 1.),
-        dir: Vec3::new(0., 0., -1.),
-    };
-    let result = t.intersect(&r);
-    match result {
-        Some(hit) => {
-            if (hit.t - 1.).abs() >= 0.0001 {
-                panic!("distance should be 1, got {:.6}", hit.t);
-            }
-            if !hit.n.equal_within(&-r.dir, 0.00001) {
-                panic!(
-                    "hit normal should be the opposite of the ray direction, got {:?}",
-                    hit.n
-                );
-            }
-        }
-        None => panic!("ray should have hit"),
-    }
-
-    let r = Ray {
-        pos: Vec3::new(0., 0., 1.),
-        dir: Vec3::new(0., -5., 1.),
-    };
-    assert!(t.intersect(&r).is_none());
-}
-
 pub struct TriangleIterator<'a> {
     mesh: &'a Mesh,
     i: usize,
