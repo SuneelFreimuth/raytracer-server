@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { createRoot } from 'react-dom/client';
 
 import {
@@ -6,6 +6,7 @@ import {
   Box, FormControl, FormLabel, Select, Center, Alert, AlertIcon, Progress, useColorMode, IconButton, GridItem, Table, Thead, Tr, Td, Tbody, HStack, Drawer, Heading, DrawerOverlay, DrawerContent, DrawerCloseButton, DrawerHeader, DrawerBody, Container, Text
 } from '@chakra-ui/react';
 import { FaImage, FaInfoCircle, FaMoon, FaStop, FaSun } from 'react-icons/fa';
+// import { Canvas } from 'reaflow';
 
 createRoot(document.getElementById('root'))
   .render(
@@ -19,7 +20,7 @@ const HEIGHT = 450;
 const SERVER = "ws://localhost:8080";
 
 interface RenderResult {
-  imageData: ImageData,
+  imageBitmap: ImageBitmap,
   /** In seconds with millisecond precision. */
   timeToRender: number,
 }
@@ -47,25 +48,23 @@ function App() {
   const { connection, error, send } = useWebSocket({
     url: SERVER,
     binaryType: 'arraybuffer',
-    onMessage: event => {
+    onMessage: async (event) => {
       const view = new DataView(event.data);
       switch (view.getUint8(0)) {
         case ServerMessage.RenderedPixels:
-          console.count('rendered pixel');
           drawPixel(view);
           imageDidChange = true;
+
           const lastPixel = WIDTH * HEIGHT;
           if (renderJob!.pixelsRendered < lastPixel)
             renderJob!.pixelsRendered += 1;
+
           if (renderJob!.pixelsRendered === lastPixel) {
             const timeToRender = (Date.now() - renderJob!.start) / 1000;
+            const imageBitmap = await createImageBitmap(new ImageData(image, WIDTH, HEIGHT));
             setRenderResults(rrs => {
               const renderResults = structuredClone(rrs);
-              renderResults.push({
-                imageData: new ImageData(image, WIDTH, HEIGHT),
-                timeToRender,
-              });
-              console.log(renderResults);
+              renderResults.unshift({ imageBitmap, timeToRender });
               return renderResults;
             });
             renderJob = null;
@@ -181,7 +180,7 @@ function App() {
             </Button>
             {error !== null ?
               <Alert status='error' variant='left-accent'>
-                <AlertIcon />
+                <AlertIcon/>
                 Could not connect to the server.
               </Alert> :
               null
@@ -198,14 +197,10 @@ function App() {
             </Tr>
           </Thead>
           <Tbody>
-            {renderResults.map(({ imageData, timeToRender }, i) => (
+            {renderResults.map(({ imageBitmap, timeToRender }, i) => (
               <Tr key={`row${i}`}>
                 <Td>
-                  <ImageDataView
-                    data={imageData}
-                    width={imageData.width}
-                    height={imageData.height}
-                  />
+                  <ImageBitmapView bitmap={imageBitmap}/>
                 </Td>
                 <Td>{timeToRender.toFixed(1)}s</Td>
               </Tr>
@@ -255,7 +250,28 @@ function About() {
               <VStack spacing={4} align='left'>
                 <Heading size='3xl'>About</Heading>
                 <Text fontSize='xl'>Frontend for a raytracer written in Rust.</Text>
-                <Text fontSize='xl'>The client communicates with the server via a Websocket connection. Pixels are placed when they arrive.</Text>
+                <Heading size='lg'>How it Works</Heading>
+                {/* <Canvas
+                  maxWidth={800}
+                  maxHeight={600}
+                  nodes={[
+                    {
+                      id: '1',
+                      text: '1'
+                    },
+                    {
+                      id: '2',
+                      text: '2'
+                    }
+                  ]}
+                  edges={[
+                    {
+                      id: '1-2',
+                      from: '1',
+                      to: '2'
+                    }
+                  ]}
+                /> */}
               </VStack>
             </Container>
           </DrawerBody>
@@ -278,24 +294,33 @@ function ColorModeToggle({ isDark, onClick }) {
   )
 }
 
-function ImageDataView({ data, width: w, height: h }: {
-  data: ImageData,
-  width: number,
-  height: number,
+function ImageBitmapView({ bitmap }: {
+  bitmap: ImageBitmap,
 }) {
   const canvasRef = useRef(null as HTMLCanvasElement | null);
   const width = 100;
-  const height = width * h / w;
+  const height = width * bitmap.height / bitmap.width;
 
   useEffect(() => {
-    const ctx = canvasRef.current?.getContext('2d')
-    if (ctx) {
-      ctx.putImageData(data, 0, 0);
-      ctx.scale(width / w, height / h);
-    }
-  }, [canvasRef, data]);
+    (async () => {
+      const resizedBitmap = await createImageBitmap(bitmap, {
+        resizeWidth: width,
+        resizeHeight: height
+      });
+      canvasRef
+        .current
+        ?.getContext('bitmaprenderer')
+        ?.transferFromImageBitmap(resizedBitmap);
+    })()
+  }, [canvasRef, bitmap]);
 
-  return <canvas ref={canvasRef} width={width} height={height} />
+  return (
+    <canvas
+      ref={canvasRef}
+      width={width}
+      height={height}
+    />
+  );
 }
 
 enum ServerMessage {

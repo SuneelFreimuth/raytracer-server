@@ -4,7 +4,6 @@ const { exit } = require('process');
 
 function main() {
   let connected;
-  console.log(formatBytes(new Uint8Array([1, 2, 3, 4, 12, 28, 44, 75, 100, 200, 240, 255])))
 
   const hostname = process.argv[2];
 
