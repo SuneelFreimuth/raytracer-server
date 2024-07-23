@@ -4,6 +4,7 @@ use std::env::args;
 use std::fs::File;
 use std::io::BufReader;
 use std::iter::zip;
+use std::ops::Range;
 use std::panic;
 use std::process::exit;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,12 +34,15 @@ const PORT: &str = "8080";
 const WIDTH: usize = 600;
 const HEIGHT: usize = 450;
 const SCENE_NAMES: [&str; 3] = ["cornell_box", "cubes", "flying_unicorn"];
+// Range: 0-255
+const PIXELS_PER_MSG: usize = 30;
 
 #[tokio::main]
 async fn main() {
     let args = args().collect::<Vec<String>>();
     if args.len() < 2 {
-        panic!("Usage: raytracer-server <scenes directory>");
+        eprintln!("Usage: raytracer-server <scenes directory>");
+        return;
     }
 
     let scene_dir = &args[1];
@@ -137,7 +141,7 @@ async fn handle_connection(
                             &scene,
                             WIDTH,
                             HEIGHT,
-                            16,
+                            4,
                             &outgoing,
                             &render_in_progress,
                         )
@@ -203,30 +207,70 @@ async fn render_to_websocket(
     outgoing: &Arc<Mutex<Outgoing>>,
     render_in_progress: &Arc<AtomicBool>,
 ) {
-    join_all(Range2::new(WIDTH, HEIGHT).map(|(y, x)| {
+    join_all((0..10).map(|t| {
         let outgoing = Arc::clone(outgoing);
         let render_in_progress = Arc::clone(render_in_progress);
         async move {
-            if !render_in_progress.load(Ordering::SeqCst) {
-                return;
-            }
+            for y in (t * HEIGHT / 10)..((t + 1) * HEIGHT / 10) {
+                for x in (0..WIDTH).step_by(PIXELS_PER_MSG) {
+                    if !render_in_progress.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    let num_pixels = PIXELS_PER_MSG.min(WIDTH - x);
+                    let mut msg = Vec::<u8>::with_capacity(2 + 3 * num_pixels);
+                    msg.push(0);
+                    msg.push(num_pixels as u8);
+                    msg.write_u16::<LittleEndian>(x as u16).unwrap();
+                    msg.write_u16::<LittleEndian>(y as u16).unwrap();
+                    for x_ in x..x + num_pixels {
+                        let pixel = sample_pixel(x_, height - y - 1, width, height, samples_per_pixel, scene);
+                        serialize_rendered_pixel(&mut msg, x_, y, pixel);
+                    }
+                    let msg = Message::Binary(msg);
 
-            let pixel = sample_pixel(x, height - y - 1, width, height, samples_per_pixel, scene);
-
-            let mut outgoing = outgoing.lock().await;
-            let msg = Message::Binary(serialize_pixel(x, y, pixel));
-            if let Err(err) = outgoing.feed(msg).await {
-                eprintln!("{err}");
-                return;
+                    let mut outgoing = outgoing.lock().await;
+                    if let Err(err) = outgoing.feed(msg).await {
+                        match err {
+                            Error::AlreadyClosed => {} 
+                            _ => {
+                                eprintln!("{err}");
+                            }
+                        }
+                    }
+                }
             }
         }
     }))
     .await;
+    // join_all(Range2::new(WIDTH, HEIGHT).map(|(y, x)| {
+    //     let outgoing = Arc::clone(outgoing);
+    //     let render_in_progress = Arc::clone(render_in_progress);
+    //     async move {
+    //         if !render_in_progress.load(Ordering::SeqCst) {
+    //             return;
+    //         }
+
+    //         let pixel = sample_pixel(x, height - y - 1, width, height, samples_per_pixel, scene);
+
+    //         let mut outgoing = outgoing.lock().await;
+    //         let msg = Message::Binary(serialize_pixel(x, y, pixel));
+    //         if let Err(err) = outgoing.feed(msg).await {
+    //             match err {
+    //                 Error::AlreadyClosed => {} 
+    //                 _ => {
+    //                     eprintln!("{err}");
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }))
+    // .await;
     {
         let mut outgoing = outgoing.lock().await;
         outgoing.flush().await.unwrap();
     }
 }
+
 
 struct Range2 {
     x: usize,
@@ -264,16 +308,26 @@ impl Iterator for Range2 {
     }
 }
 
-fn serialize_pixel(x: usize, y: usize, Vec3 { x: r, y: g, z: b }: Vec3) -> Vec<u8> {
-    let mut msg: Vec<u8> = Vec::with_capacity(8);
-    msg.push(0);
-    msg.write_u16::<LittleEndian>(x as u16).unwrap();
-    msg.write_u16::<LittleEndian>(y as u16).unwrap();
-    msg.push(r as u8);
-    msg.push(g as u8);
-    msg.push(b as u8);
-    msg
+
+// Serialization format:
+//   MsgLength = 2 + 8 * NumPixels
+// 
+//   HEADER (2 bytes)
+//        0: (u8, always 0) Message type
+//        1: (u8) Number of records
+// 
+//   PIXEL i (8 bytes)
+//    3*i+6: r (u8)
+//    3*i+7: g (u8)
+//    3*i+8: b (u8)
+fn serialize_rendered_pixel(data: &mut Vec<u8>, x: usize, y: usize, Vec3 { x: r, y: g, z: b }: Vec3) {
+    // data.write_u16::<LittleEndian>(x as u16).unwrap();
+    // data.write_u16::<LittleEndian>(y as u16).unwrap();
+    data.push(r as u8);
+    data.push(g as u8);
+    data.push(b as u8);
 }
+
 
 fn sample_pixel(
     x: usize,

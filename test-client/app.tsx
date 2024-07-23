@@ -6,7 +6,6 @@ import {
   Box, FormControl, FormLabel, Select, Center, Alert, AlertIcon, Progress, useColorMode, IconButton, GridItem, Table, Thead, Tr, Td, Tbody, HStack, Drawer, Heading, DrawerOverlay, DrawerContent, DrawerCloseButton, DrawerHeader, DrawerBody, Container, Text
 } from '@chakra-ui/react';
 import { FaImage, FaInfoCircle, FaMoon, FaStop, FaSun } from 'react-icons/fa';
-// import { Canvas } from 'reaflow';
 
 createRoot(document.getElementById('root'))
   .render(
@@ -36,32 +35,66 @@ const options = [
   ["Flying Unicorn", "flying_unicorn"],
 ];
 
-let image: Uint8ClampedArray;
 let renderJob: RenderJob | null = null;
+let socket: WebSocket;
+
+enum MessageType {
+  RenderedPixels = 0,
+}
 
 function App() {
   const [scene, setScene] = useState('cornell_box')
   const [renderResults, setRenderResults] = useState([] as RenderResult[]);
   const { toggleColorMode, colorMode } = useColorMode();
   const canvasRef = useRef(null as HTMLCanvasElement | null);
+  const [error, setError] = useState(null);
 
-  const { connection, error, send } = useWebSocket({
-    url: SERVER,
-    binaryType: 'arraybuffer',
-    onMessage: async (event) => {
-      const view = new DataView(event.data);
-      switch (view.getUint8(0)) {
-        case ServerMessage.RenderedPixels:
-          drawPixel(view);
-          imageDidChange = true;
+  useEffect(() => {
+    const ctx = canvasRef.current!.getContext('2d')!;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+    socket = new WebSocket(SERVER);
+    socket.binaryType = 'arraybuffer';
+
+    socket.addEventListener('open', e => {
+      console.log('Connected to server.');
+    });
+
+    socket.addEventListener('close', e => {
+      console.log('Connection to server closed.');
+    });
+
+    socket.addEventListener('message', async (e) => {
+        const view = new DataView(e.data);
+        const messageType = view.getUint8(0) as MessageType;
+        switch (messageType) {
+        case MessageType.RenderedPixels:
+          const numPixels = view.getUint8(1);
+          const ctx = canvasRef.current!.getContext('2d')!;
+          // Leverage the fact pixels will be contiguous horizontal slice
+          const x = view.getUint16(2, true);
+          const y = view.getUint16(4, true);
+          const imageData = ctx.createImageData(numPixels, 1);
+          for (let i = 0; i < numPixels; i++) {
+            const r = view.getUint8(3 * i + 6);
+            const g = view.getUint8(3 * i + 7);
+            const b = view.getUint8(3 * i + 8);
+            imageData.data[i * 4] = r;
+            imageData.data[i * 4 + 1] = g;
+            imageData.data[i * 4 + 2] = b;
+            imageData.data[i * 4 + 3] = 255;
+          }
+          ctx.putImageData(imageData, x, y);
 
           const lastPixel = WIDTH * HEIGHT;
           if (renderJob!.pixelsRendered < lastPixel)
-            renderJob!.pixelsRendered += 1;
+            renderJob!.pixelsRendered += numPixels;
 
           if (renderJob!.pixelsRendered === lastPixel) {
             const timeToRender = (Date.now() - renderJob!.start) / 1000;
-            const imageBitmap = await createImageBitmap(new ImageData(image, WIDTH, HEIGHT));
+            const imageBitmap =
+              await createImageBitmap(ctx.getImageData(0, 0, WIDTH, HEIGHT));
             setRenderResults(rrs => {
               const renderResults = structuredClone(rrs);
               renderResults.unshift({ imageBitmap, timeToRender });
@@ -70,40 +103,38 @@ function App() {
             renderJob = null;
           }
           break;
-      }
-    }
-  });
+        }
+    });
+  }, []);
 
-  let imageDidChange: boolean;
+  // const { connection, error, send } = useWebSocket({
+  //   url: SERVER,
+  //   binaryType: 'arraybuffer',
+  //   onMessage: async (event) => {
+  //     const view = new DataView(event.data);
+  //     switch (view.getUint8(0)) {
+  //       case ServerMessage.RenderedPixels:
+  //         drawPixel(view);
+  //         imageDidChange = true;
 
-  const drawPixel = (view: DataView) => {
-    const x = view.getUint16(1, true);
-    const y = view.getUint16(3, true);
-    const i = 4 * (y * WIDTH + x);
-    image[i] = view.getUint8(5);
-    image[i + 1] = view.getUint8(6);
-    image[i + 2] = view.getUint8(7);
-    image[i + 3] = 255;
-  }
+  //         const lastPixel = WIDTH * HEIGHT;
+  //         if (renderJob!.pixelsRendered < lastPixel)
+  //           renderJob!.pixelsRendered += 1;
 
-  let ctx: CanvasRenderingContext2D;
-
-  useEffect(() => {
-    if (canvasRef.current === null)
-      return;
-    ctx = canvasRef.current!.getContext("2d")!;
-    ctx.strokeStyle = 'none';
-    image = new Uint8ClampedArray(4 * WIDTH * HEIGHT).fill(255);
-    imageDidChange = true;
-    (function animate() {
-      if (imageDidChange) {
-        const frame = new ImageData(image, WIDTH, HEIGHT);
-        ctx.putImageData(frame, 0, 0);
-        imageDidChange = false;
-      }
-      requestAnimationFrame(animate);
-    })();
-  }, [canvasRef]);
+  //         if (renderJob!.pixelsRendered === lastPixel) {
+  //           const timeToRender = (Date.now() - renderJob!.start) / 1000;
+  //           const imageBitmap = await createImageBitmap(new ImageData(image, WIDTH, HEIGHT));
+  //           setRenderResults(rrs => {
+  //             const renderResults = structuredClone(rrs);
+  //             renderResults.unshift({ imageBitmap, timeToRender });
+  //             return renderResults;
+  //           });
+  //           renderJob = null;
+  //         }
+  //         break;
+  //     }
+  //   }
+  // });
 
   return (
     <Grid
@@ -149,18 +180,15 @@ function App() {
           as='form'
           onSubmit={e => {
             e.preventDefault();
-            if (connection === 'open') {
-              const request = JSON.stringify(
-                Boolean(renderJob) ?
-                  { type: 'stop_rendering' } :
-                  { type: 'render', scene }
-              );
-              renderJob = {
-                pixelsRendered: 0,
-                start: Date.now(),
-              };
-              send(request);
-            }
+            const request = 
+              Boolean(renderJob) ?
+                { type: 'stop_rendering' } :
+                { type: 'render', scene };
+            renderJob = {
+              pixelsRendered: 0,
+              start: Date.now(),
+            };
+            socket.send(JSON.stringify(request));
           }}
         >
           <VStack>
@@ -211,6 +239,7 @@ function App() {
     </Grid>
   )
 }
+
 
 function About() {
   const [isOpen, setIsOpen] = useState(false);
@@ -325,75 +354,4 @@ function ImageBitmapView({ bitmap }: {
 
 enum ServerMessage {
   RenderedPixels = 0,
-}
-
-export type ConnectionState = 'connecting' | 'open' | 'closed'
-
-export function useWebSocket({
-  url,
-  protocols,
-  binaryType,
-  onMessage
-}: {
-  url: URL | string,
-  protocols?: string | string[],
-  binaryType?: 'blob' | 'arraybuffer',
-  onMessage?: (m: MessageEvent) => void,
-}) {
-  const [socket, setSocket] = useState(null as WebSocket | null);
-  const [connection, setConnection] = useState('connecting' as ConnectionState);
-  const [error, setError] = useState(null as any);
-
-  useEffect(() => {
-    let sock: WebSocket;
-    try {
-      sock = new WebSocket(url, protocols);
-    } catch (err) {
-      setError(err);
-      setConnection('closed');
-      return;
-    }
-
-    if (binaryType)
-      sock.binaryType = binaryType;
-
-    sock.addEventListener('open', _ => {
-      setConnection('open');
-    });
-
-    sock.addEventListener('message', event => {
-      onMessage?.(event);
-    });
-
-    sock.addEventListener('error', event => {
-      setError(event);
-    });
-
-    sock.addEventListener('close', event => {
-      setConnection('closed');
-      if (!event.wasClean)
-        setError(event);
-    });
-
-    setSocket(sock);
-
-    return () => {
-      sock.close();
-    };
-  }, []);
-
-  const send = (message: string | ArrayBufferLike | Blob | ArrayBufferView) => {
-    socket?.send(message);
-  };
-
-  return {
-    connection,
-    error,
-    send,
-  };
-}
-
-function assert(cond: boolean): asserts cond {
-  if (cond)
-    throw new Error('assertion failed');
 }
