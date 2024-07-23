@@ -127,7 +127,7 @@ impl Scene {
         Self {
             name: String::new(),
             light_source: 'find_source: {
-                for (i, obj) in objects.iter().enumerate() {
+                for (i, obj) in objects.as_slice().iter().enumerate() {
                     if !obj.emitted.equal_within(&Vec3::zero(), 0.00001) {
                         break 'find_source i;
                     }

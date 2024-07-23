@@ -49,6 +49,45 @@ function App() {
   const canvasRef = useRef(null as HTMLCanvasElement | null);
   const [error, setError] = useState(null);
 
+  const onMessage = async (e) => {
+    const view = new DataView(e.data);
+    const messageType = view.getUint8(0) as MessageType;
+    switch (messageType) {
+    case MessageType.RenderedPixels:
+      const numPixels = view.getUint8(1);
+      const ctx = canvasRef.current!.getContext('2d')!;
+      // Leverage the fact pixels will be contiguous horizontal slice
+      const x = view.getUint16(2, true);
+      const y = view.getUint16(4, true);
+      const imageData = ctx.createImageData(numPixels, 1);
+      for (let i = 0; i < numPixels; i++) {
+        const r = view.getUint8(3 * i + 6);
+        const g = view.getUint8(3 * i + 7);
+        const b = view.getUint8(3 * i + 8);
+        imageData.data[i * 4] = r;
+        imageData.data[i * 4 + 1] = g;
+        imageData.data[i * 4 + 2] = b;
+        imageData.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(imageData, x, y);
+
+      renderJob!.pixelsRendered += numPixels;
+      const lastPixel = WIDTH * HEIGHT;
+      if (renderJob!.pixelsRendered >= lastPixel) {
+        const timeToRender = (Date.now() - renderJob!.start) / 1000;
+        const imageBitmap =
+          await createImageBitmap(ctx.getImageData(0, 0, WIDTH, HEIGHT));
+        setRenderResults(rrs => {
+          const renderResults = structuredClone(rrs);
+          renderResults.unshift({ imageBitmap, timeToRender });
+          return renderResults;
+        });
+        renderJob = null;
+      }
+      break;
+    }
+  };
+
   useEffect(() => {
     const ctx = canvasRef.current!.getContext('2d')!;
     ctx.fillStyle = '#fff';
@@ -65,76 +104,8 @@ function App() {
       console.log('Connection to server closed.');
     });
 
-    socket.addEventListener('message', async (e) => {
-        const view = new DataView(e.data);
-        const messageType = view.getUint8(0) as MessageType;
-        switch (messageType) {
-        case MessageType.RenderedPixels:
-          const numPixels = view.getUint8(1);
-          const ctx = canvasRef.current!.getContext('2d')!;
-          // Leverage the fact pixels will be contiguous horizontal slice
-          const x = view.getUint16(2, true);
-          const y = view.getUint16(4, true);
-          const imageData = ctx.createImageData(numPixels, 1);
-          for (let i = 0; i < numPixels; i++) {
-            const r = view.getUint8(3 * i + 6);
-            const g = view.getUint8(3 * i + 7);
-            const b = view.getUint8(3 * i + 8);
-            imageData.data[i * 4] = r;
-            imageData.data[i * 4 + 1] = g;
-            imageData.data[i * 4 + 2] = b;
-            imageData.data[i * 4 + 3] = 255;
-          }
-          ctx.putImageData(imageData, x, y);
-
-          const lastPixel = WIDTH * HEIGHT;
-          if (renderJob!.pixelsRendered < lastPixel)
-            renderJob!.pixelsRendered += numPixels;
-
-          if (renderJob!.pixelsRendered === lastPixel) {
-            const timeToRender = (Date.now() - renderJob!.start) / 1000;
-            const imageBitmap =
-              await createImageBitmap(ctx.getImageData(0, 0, WIDTH, HEIGHT));
-            setRenderResults(rrs => {
-              const renderResults = structuredClone(rrs);
-              renderResults.unshift({ imageBitmap, timeToRender });
-              return renderResults;
-            });
-            renderJob = null;
-          }
-          break;
-        }
-    });
+    socket.addEventListener('message', onMessage);
   }, []);
-
-  // const { connection, error, send } = useWebSocket({
-  //   url: SERVER,
-  //   binaryType: 'arraybuffer',
-  //   onMessage: async (event) => {
-  //     const view = new DataView(event.data);
-  //     switch (view.getUint8(0)) {
-  //       case ServerMessage.RenderedPixels:
-  //         drawPixel(view);
-  //         imageDidChange = true;
-
-  //         const lastPixel = WIDTH * HEIGHT;
-  //         if (renderJob!.pixelsRendered < lastPixel)
-  //           renderJob!.pixelsRendered += 1;
-
-  //         if (renderJob!.pixelsRendered === lastPixel) {
-  //           const timeToRender = (Date.now() - renderJob!.start) / 1000;
-  //           const imageBitmap = await createImageBitmap(new ImageData(image, WIDTH, HEIGHT));
-  //           setRenderResults(rrs => {
-  //             const renderResults = structuredClone(rrs);
-  //             renderResults.unshift({ imageBitmap, timeToRender });
-  //             return renderResults;
-  //           });
-  //           renderJob = null;
-  //         }
-  //         break;
-  //     }
-  //   }
-  // });
 
   return (
     <Grid
@@ -167,8 +138,11 @@ function App() {
             />
             {Boolean(renderJob) ?
               <Progress
-                value={renderJob!.pixelsRendered / (WIDTH * HEIGHT) * 100}
-                style={{ width: '100%' }}
+                min={0}
+                max={WIDTH * HEIGHT}
+                value={renderJob!.pixelsRendered}
+                size="lg"
+                // style={{ width: '100%' }}
               /> :
               null
             }
