@@ -36,7 +36,7 @@ const options = [
 ];
 
 let renderJob: RenderJob | null = null;
-let socket: WebSocket;
+let connection: Connection;
 
 enum MessageType {
   RenderedPixels = 0,
@@ -55,33 +55,25 @@ function App() {
     switch (messageType) {
     case MessageType.RenderedPixels:
       const numPixels = view.getUint8(1);
-      const ctx = canvasRef.current!.getContext('2d')!;
-      // Leverage the fact pixels will be contiguous horizontal slice
       const x = view.getUint16(2, true);
       const y = view.getUint16(4, true);
-      const imageData = ctx.createImageData(numPixels, 1);
+      const data = new Uint8ClampedArray(view.buffer, 6);
+      const imageData = new ImageData(numPixels, 1);
       for (let i = 0; i < numPixels; i++) {
-        const r = view.getUint8(3 * i + 6);
-        const g = view.getUint8(3 * i + 7);
-        const b = view.getUint8(3 * i + 8);
-        imageData.data[i * 4] = r;
-        imageData.data[i * 4 + 1] = g;
-        imageData.data[i * 4 + 2] = b;
+        imageData.data.set(data.subarray(i * 3, i * 3 + 3), i * 4);
         imageData.data[i * 4 + 3] = 255;
       }
+      const ctx = canvasRef.current?.getContext('2d')!;
       ctx.putImageData(imageData, x, y);
 
       renderJob!.pixelsRendered += numPixels;
-      const lastPixel = WIDTH * HEIGHT;
-      if (renderJob!.pixelsRendered >= lastPixel) {
+      if (renderJob!.pixelsRendered >= WIDTH * HEIGHT) {
         const timeToRender = (Date.now() - renderJob!.start) / 1000;
         const imageBitmap =
           await createImageBitmap(ctx.getImageData(0, 0, WIDTH, HEIGHT));
-        setRenderResults(rrs => {
-          const renderResults = structuredClone(rrs);
-          renderResults.unshift({ imageBitmap, timeToRender });
-          return renderResults;
-        });
+        setRenderResults(rrs =>
+          [{ imageBitmap, timeToRender }, ...rrs]
+        );
         renderJob = null;
       }
       break;
@@ -93,18 +85,7 @@ function App() {
     ctx.fillStyle = '#fff';
     ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
-    socket = new WebSocket(SERVER);
-    socket.binaryType = 'arraybuffer';
-
-    socket.addEventListener('open', e => {
-      console.log('Connected to server.');
-    });
-
-    socket.addEventListener('close', e => {
-      console.log('Connection to server closed.');
-    });
-
-    socket.addEventListener('message', onMessage);
+    connection = new Conn
   }, []);
 
   return (
@@ -162,7 +143,7 @@ function App() {
               pixelsRendered: 0,
               start: Date.now(),
             };
-            socket.send(JSON.stringify(request));
+            connection.send(JSON.stringify(request));
           }}
         >
           <VStack>
@@ -212,6 +193,21 @@ function App() {
       </GridItem>
     </Grid>
   )
+}
+
+// Serialization format for rendered pixels:
+//   MsgLength = 2 + 8 * NumPixels
+//
+//   HEADER (2 bytes)
+//        [0]  Message Type (u8, always 0)
+//        [1]  Num Records (u8)
+//
+//   PIXEL i (8 bytes)
+//     [3i+6]  r (u8)
+//     [3i+7]  g (u8)
+//     [3i+8]  b (u8)
+function deserializeRenderedPixels(view: DataView): ImageData {
+  return imageData;
 }
 
 

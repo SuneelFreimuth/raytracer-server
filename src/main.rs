@@ -12,8 +12,10 @@ use crate::server::Server;
 use crate::geometry::{MeshLoadError};
 use crate::scene::{LoadTomlError, Scene};
 
+
 const PORT: &str = "8080";
 const SCENE_NAMES: [&str; 3] = ["cornell_box", "cubes", "flying_unicorn"];
+
 
 #[tokio::main]
 async fn main() {
@@ -50,4 +52,3 @@ fn load_scene(path: &String) -> Scene {
         }
     }
 }
-

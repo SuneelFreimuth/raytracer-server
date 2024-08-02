@@ -22,210 +22,271 @@ use tokio::sync::Mutex;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tungstenite::{Error, Message};
 
+
 pub struct Server {
     scenes: Arc<HashMap<String, Scene>>,
-    connections: Arc<RwLock<HashSet<String>>>,
+    connections: Arc<Mutex<HashSet<String>>>,
 }
 
-type Outgoing = Buffer<SplitSink<WebSocketStream<TcpStream>, Message>, Message>;
-
 impl Server {
-    const SEND_BUFFER_SIZE: usize = 4_000;
-    // Range: 0-255
-    const PIXELS_PER_MSG: usize = 30;
-    const WIDTH: usize = 600;
-    const HEIGHT: usize = 450;
+    const WIDTH: i32 = 600;
+    const HEIGHT: i32 = 450;
 
     pub fn new(scenes: HashMap<String, Scene>) -> Self {
         Self {
             scenes: Arc::new(scenes),
-            connections: Arc::new(RwLock::new(HashSet::new())),
+            connections: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     pub async fn listen(self, port: &str) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
             .unwrap();
-
         println!("Listening on port {port}.");
         while let Ok((connection, _)) = listener.accept().await {
-            let websocket = accept_async(connection).await.unwrap();
-
-            let id = self.unique_connection_id();
-            self.connections.write().unwrap().insert(id.clone());
-
-            let connections = Arc::clone(&self.connections);
+            let id = self.generate_connection_id().await;
             let scenes = Arc::clone(&self.scenes);
+            let websocket = accept_async(connection).await.unwrap();
+            let connections = Arc::clone(&self.connections);
             tokio::spawn(async move {
-                Server::handle_connection(&id, &scenes, websocket).await;
-                connections.write().unwrap().remove(&id);
+                Server::handle_connection(&id, scenes, websocket).await;
+                connections.lock().await.remove(&id);
             });
         }
     }
 
-    fn unique_connection_id(&self) -> String {
-        let connections = self.connections.read().unwrap();
+    async fn generate_connection_id(&self) -> String {
+        let mut connections = self.connections.lock().await;
         const ALPHABET: &str = "abcdefghijklmnopqrstuvwxyz";
-        loop {
-            let id = ALPHABET
+        let id = loop {
+            let random_id = ALPHABET
                 .chars()
                 .choose_multiple(&mut rand::thread_rng(), 6)
                 .into_iter()
                 .collect::<String>();
-            if !connections.contains(&id) {
-                return id;
+            if !connections.contains(&random_id) {
+                break random_id;
             }
-        }
+        };
+        connections.insert(id.clone());
+        id
     }
 
     async fn handle_connection(
         id: &String,
-        scenes: &Arc<HashMap<String, Scene>>,
+        scenes: Arc<HashMap<String, Scene>>,
         websocket: WebSocketStream<TcpStream>,
     ) {
         println!("[{id}] Accepted connection.");
-
         let (outgoing, mut incoming) = websocket.split();
-        let outgoing = Arc::new(Mutex::new(outgoing.buffer(Self::SEND_BUFFER_SIZE)));
-
-        // Toggling to false cancels the current render.
-        let render_in_progress = Arc::new(AtomicBool::new(false));
-
+        let render_job = Arc::new(RenderJob::new(outgoing));
         while let Some(Ok(msg)) = incoming.next().await {
             println!("[{id}] New message: '{msg}'");
-
             if let Message::Text(text) = msg {
                 let msg: ClientMessage =
                     serde_json::from_str(text.as_str()).expect("failed to parse message");
-                match (render_in_progress.load(Ordering::SeqCst), msg) {
-                    (false, ClientMessage::Render { scene }) => {
-                        render_in_progress.store(true, Ordering::SeqCst);
-                        let render_in_progress = Arc::clone(&render_in_progress);
+                match (render_job.running(), msg) {
+                    (false, ClientMessage::Render { scene, spp }) => {
                         let id = id.clone();
-                        let outgoing = Arc::clone(&outgoing);
                         let scenes = Arc::clone(&scenes);
+                        let render_job = Arc::clone(&render_job);
                         tokio::spawn(async move {
                             println!("[{id}] Rendering...");
                             let scene = scenes.get(&scene).unwrap();
-                            Self::render_to_websocket(
-                                &scene,
-                                Self::WIDTH,
-                                Self::HEIGHT,
-                                4,
-                                &outgoing,
-                                &render_in_progress,
-                            )
-                            .await;
-                            outgoing.lock().await.flush().await.unwrap();
-                            render_in_progress.store(false, Ordering::SeqCst);
-                            println!("[{id}] Done rendering.");
+                            let cancelled_early =
+                                render_job.run(&scene, Self::WIDTH, Self::HEIGHT, spp).await;
+                            if !cancelled_early {
+                                println!("[{id}] Done rendering.");
+                            }
                         });
                     }
                     (true, ClientMessage::StopRendering) => {
-                        render_in_progress.store(false, Ordering::SeqCst);
+                        render_job.stop();
                         println!("[{id}] Render cancelled.");
                     }
                     _ => {}
                 }
             }
         }
-
         println!("[{id}] Disconnected.");
     }
+}
 
-    async fn render_to_websocket(
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case", tag = "type")]
+enum ClientMessage {
+    Render { scene: String, spp: i32 },
+    StopRendering,
+}
+
+
+type Outgoing = SplitSink<WebSocketStream<TcpStream>, Message>;
+
+// Serialization format for outgoing WebSocket messages:
+//   MsgLength = 2 + 8 * NumPixels
+//
+//   HEADER (2 bytes)
+//        [0]  Message Type (u8, always 0)
+//        [1]  Num Records (u8)
+//
+//   PIXEL i (8 bytes)
+//     [3i+6]  r (u8)
+//     [3i+7]  g (u8)
+//     [3i+8]  b (u8)
+struct RenderJob {
+    outgoing: Arc<Mutex<Outgoing>>,
+    cancel_token: Arc<CancellationToken>,
+}
+
+impl RenderJob {
+    const NUM_TASKS: i32 = 10;
+    const PIXELS_PER_MSG: i32 = 30;
+
+    pub fn new(outgoing: Outgoing) -> Self {
+        let cancelled_token = CancellationToken::new();
+        cancelled_token.cancel();
+        Self {
+            outgoing: Arc::new(Mutex::new(outgoing)),
+            cancel_token: Arc::new(cancelled_token),
+        }
+    }
+
+    // Returns whether the run was stopped before its completion
+    pub async fn run(
+        &self,
         scene: &Scene,
-        width: usize,
-        height: usize,
-        samples_per_pixel: usize,
-        outgoing: &Arc<Mutex<Outgoing>>,
-        render_in_progress: &Arc<AtomicBool>,
-    ) {
-        join_all((0..10).map(|t| {
-            let outgoing = Arc::clone(outgoing);
-            let render_in_progress = Arc::clone(render_in_progress);
-            async move {
-                for y in (t * height / 10)..((t + 1) * height / 10) {
-                    for x in (0..width).step_by(Self::PIXELS_PER_MSG) {
-                        if !render_in_progress.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        let num_pixels = Self::PIXELS_PER_MSG.min(width - x);
-                        let mut msg = Vec::<u8>::with_capacity(2 + 3 * num_pixels);
-                        msg.push(0);
-                        msg.push(num_pixels as u8);
-                        msg.write_u16::<LittleEndian>(x as u16).unwrap();
-                        msg.write_u16::<LittleEndian>(y as u16).unwrap();
-                        for x_ in x..x + num_pixels {
-                            let pixel = sample_pixel(
-                                x_,
-                                height - y - 1,
-                                width,
-                                height,
-                                samples_per_pixel,
-                                scene,
-                            );
-                            Self::serialize_rendered_pixel(&mut msg, pixel);
-                        }
-                        Self::send(&outgoing, msg).await;
+        width: i32,
+        height: i32,
+        samples_per_pixel: i32,
+    ) -> bool {
+        self.cancel_token.reset();
+        join_all((0..Self::NUM_TASKS).map(|t| async move {
+            // Assumes height is evenly divisible by NUM_TASKS.
+            for y in (t * height / Self::NUM_TASKS)..((t + 1) * height / Self::NUM_TASKS) {
+                for (x, num_pixels) in windows(0, width, Self::PIXELS_PER_MSG) {
+                    if self.cancel_token.is_cancelled() {
+                        return;
                     }
+                    let mut msg = Vec::<u8>::with_capacity(6 + 3 * num_pixels as usize);
+                    msg.push(0);
+                    msg.push(num_pixels as u8);
+                    msg.write_u16::<LittleEndian>(x as u16).unwrap();
+                    msg.write_u16::<LittleEndian>(y as u16).unwrap();
+                    for x_ in x..x + num_pixels {
+                        let Vec3 { x: r, y: g, z: b } = sample_pixel(
+                            x_,
+                            height - y - 1,
+                            width,
+                            height,
+                            samples_per_pixel,
+                            scene,
+                        );
+                        msg.write_u8(r as u8).unwrap();
+                        msg.write_u8(g as u8).unwrap();
+                        msg.write_u8(b as u8).unwrap();
+                    }
+                    self.send(msg).await;
                 }
             }
         }))
         .await;
+        self.outgoing.lock().await.flush().await.unwrap();
+        self.cancel_token.cancel()
     }
 
-    async fn send(outgoing: &Arc<Mutex<Outgoing>>, msg: Vec<u8>) {
+    pub fn stop(&self) {
+        _ = self.cancel_token.cancel();
+    }
+
+    pub fn running(&self) -> bool {
+        !self.cancel_token.is_cancelled()
+    }
+
+    async fn send(&self, msg: Vec<u8>) {
         let msg = Message::Binary(msg);
-        let mut outgoing = outgoing.lock().await;
+        let mut outgoing = self.outgoing.lock().await;
         if let Err(err) = outgoing.feed(msg).await {
             match err {
-                Error::AlreadyClosed => {}
-                Error::ConnectionClosed => {}
+                Error::AlreadyClosed | Error::ConnectionClosed => {
+                    self.cancel_token.cancel();
+                }
                 _ => {
                     eprintln!("{err}");
                 }
             }
         }
     }
+}
 
-    // Serialization format:
-    //   MsgLength = 2 + 8 * NumPixels
-    //
-    //   HEADER (2 bytes)
-    //        0: (u8, always 0) Message type
-    //        1: (u8) Number of records
-    //
-    //   PIXEL i (8 bytes)
-    //    3*i+6: r (u8)
-    //    3*i+7: g (u8)
-    //    3*i+8: b (u8)
-    fn serialize_rendered_pixel(data: &mut Vec<u8>, Vec3 { x: r, y: g, z: b }: Vec3) {
-        // data.write_u16::<LittleEndian>(x as u16).unwrap();
-        // data.write_u16::<LittleEndian>(y as u16).unwrap();
-        data.push(r as u8);
-        data.push(g as u8);
-        data.push(b as u8);
+
+struct CancellationToken {
+    cancelled: AtomicBool,
+}
+
+impl CancellationToken {
+    pub fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    // Returns whether the token was already cancelled.
+    pub fn cancel(&self) -> bool {
+        self.cancelled
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+    }
+
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::SeqCst);
     }
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
-enum ClientMessage {
-    Render { scene: String },
-    StopRendering,
+
+fn windows(start: i32, end: i32, window_size: i32) -> Windows {
+    Windows {
+        i: start,
+        end,
+        window_size,
+    }
 }
 
+struct Windows {
+    i: i32,
+    end: i32,
+    window_size: i32,
+}
+
+impl Iterator for Windows {
+    type Item = (i32, i32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.i < self.end {
+            let result = (self.i, self.window_size.min(self.end - self.i));
+            self.i += self.window_size;
+            Some(result)
+        } else {
+            None
+        }
+    }
+}
+
+
 struct Range2 {
-    x: usize,
-    y: usize,
-    max_x: usize,
-    max_y: usize,
+    x: i32,
+    y: i32,
+    max_x: i32,
+    max_y: i32,
 }
 
 impl Range2 {
-    pub fn new(max_x: usize, max_y: usize) -> Self {
+    pub fn new(max_x: i32, max_y: i32) -> Self {
         Self {
             x: 0,
             y: 0,
@@ -236,7 +297,7 @@ impl Range2 {
 }
 
 impl Iterator for Range2 {
-    type Item = (usize, usize);
+    type Item = (i32, i32);
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.y < self.max_y {
@@ -253,12 +314,13 @@ impl Iterator for Range2 {
     }
 }
 
+
 fn sample_pixel(
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-    samples_per_pixel: usize,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    samples_per_pixel: i32,
     scene: &Scene,
 ) -> Vec3 {
     let w = width as f64;
