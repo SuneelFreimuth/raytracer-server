@@ -1,4 +1,4 @@
-# Pathtracer
+# Raytracer Server
 
 A multithreaded CPU-driven raytracer using pathtracing.
 
