@@ -2,14 +2,15 @@
 
 A multithreaded CPU-driven raytracer using pathtracing.
 
-![Raytraced scene of a winged unicorn statue and an ideal specular ball](pegasus-phong.png)
+![Screen recording of raytracer server streaming rendered pixels to web client.](raytracer.gif)
+*Streaming render to web client*
 
 To run:
 ```shell
-cargo run --profile release # 4 samples per pixel
-cargo run --profile release -- <samples_per_pixel>
+cargo run --profile=release -- <scenes directory>
 ```
 
+<!--
 To configure the renderer, modify `src/config.rs`:
 ```rs
 pub enum Target {
@@ -32,3 +33,4 @@ pub const PPM_FILE: &str = if USE_MIS {
     "without_mis.ppm"
 };
 ```
+-->
