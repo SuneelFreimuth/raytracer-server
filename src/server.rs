@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::iter::zip;
 use std::ops::Range;
-use std::panic;
+use std::{panic, thread};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{accept_async, WebSocketStream};
-use tungstenite::{Error, Message};
+use tokio_tungstenite::tungstenite::{Bytes, Error, Message};
 
 
 pub struct Server {
@@ -125,13 +125,10 @@ enum ClientMessage {
 type Outgoing = SplitSink<WebSocketStream<TcpStream>, Message>;
 
 // Serialization format for outgoing WebSocket messages:
-//   MsgLength = 2 + 8 * NumPixels
+//   Message Length: 2 + 3 * NumPixels
 //
-//   HEADER (2 bytes)
-//        [0]  Message Type (u8, always 0)
+//        [0]  Message Type (u8)
 //        [1]  Num Records (u8)
-//
-//   PIXEL i (8 bytes)
 //     [3i+6]  r (u8)
 //     [3i+7]  g (u8)
 //     [3i+8]  b (u8)
@@ -141,8 +138,7 @@ struct RenderJob {
 }
 
 impl RenderJob {
-    const NUM_TASKS: i32 = 10;
-    const PIXELS_PER_MSG: i32 = 30;
+    const PIXELS_PER_MSG: i32 = 60;
 
     pub fn new(outgoing: Outgoing) -> Self {
         let cancelled_token = CancellationToken::new();
@@ -162,9 +158,10 @@ impl RenderJob {
         samples_per_pixel: i32,
     ) -> bool {
         self.cancel_token.reset();
-        join_all((0..Self::NUM_TASKS).map(|t| async move {
+        let num_tasks = thread::available_parallelism().unwrap().get() as i32;
+        join_all((0..num_tasks).map(|t| async move {
             // Assumes height is evenly divisible by NUM_TASKS.
-            for y in (t * height / Self::NUM_TASKS)..((t + 1) * height / Self::NUM_TASKS) {
+            for y in (t * height / num_tasks)..((t + 1) * height / num_tasks) {
                 for (x, num_pixels) in windows(0, width, Self::PIXELS_PER_MSG) {
                     if self.cancel_token.is_cancelled() {
                         return;
@@ -205,7 +202,7 @@ impl RenderJob {
     }
 
     async fn send(&self, msg: Vec<u8>) {
-        let msg = Message::Binary(msg);
+        let msg = Message::Binary(Bytes::from(msg));
         let mut outgoing = self.outgoing.lock().await;
         if let Err(err) = outgoing.feed(msg).await {
             match err {

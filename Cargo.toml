@@ -5,13 +5,13 @@ edition = "2021"
 
 [dependencies]
 rand = { version = "0.8.5", features = ["alloc"] }
-pixels = "0.12.1"
-winit = "0.28"
-winit_input_helper = "0.14"
+# pixels = "0.12.1"
+# winit = "0.28"
+# winit_input_helper = "0.14"
 toml = "0.7.4"
 serde = { version = "1.0", features = ["derive"] }
-image = "0.24.6"
-tungstenite = "0.20.0"
+# image = "0.24.6"
+# tungstenite = "0.20.0"
 tokio-tungstenite = "*"
 byteorder = "1.4.3"
 serde_json = "1.0.104"
