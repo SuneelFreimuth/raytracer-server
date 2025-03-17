@@ -1,10 +1,7 @@
 use std::collections::{HashMap, HashSet};
-use std::iter::zip;
-use std::ops::Range;
-use std::{panic, thread};
+use std::thread;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::sync::Arc;
 
 use crate::geometry::{Ray, Vec3};
 
@@ -13,7 +10,7 @@ use crate::scene::Scene;
 use byteorder::{LittleEndian, WriteBytesExt};
 use futures_util::future::join_all;
 use futures_util::stream::SplitSink;
-use futures_util::{sink::Buffer, SinkExt, StreamExt};
+use futures_util::{SinkExt, StreamExt};
 use rand::random;
 use rand::seq::IteratorRandom;
 use serde::Deserialize;
@@ -45,9 +42,16 @@ impl Server {
             .unwrap();
         println!("Listening on port {port}.");
         while let Ok((connection, _)) = listener.accept().await {
+            let websocket = match accept_async(connection).await {
+                Ok(sock) => sock,
+                Err(err) => {
+                    eprintln!("failed to accept connection: {err}");
+                    continue;
+                }
+            };
+
             let id = self.generate_connection_id().await;
             let scenes = Arc::clone(&self.scenes);
-            let websocket = accept_async(connection).await.unwrap();
             let connections = Arc::clone(&self.connections);
             tokio::spawn(async move {
                 Server::handle_connection(&id, scenes, websocket).await;
@@ -62,7 +66,7 @@ impl Server {
         let id = loop {
             let random_id = ALPHABET
                 .chars()
-                .choose_multiple(&mut rand::thread_rng(), 6)
+                .choose_multiple(&mut rand::thread_rng(), 5)
                 .into_iter()
                 .collect::<String>();
             if !connections.contains(&random_id) {
@@ -185,6 +189,7 @@ impl RenderJob {
                         msg.write_u8(b as u8).unwrap();
                     }
                     self.send(msg).await;
+                    println!("Sent row {y}, pixels {x} through {}", x + num_pixels);
                 }
             }
         }))

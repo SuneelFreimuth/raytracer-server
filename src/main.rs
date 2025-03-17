@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 use std::collections::{HashMap};
-use std::env::args;
+use std::env::{self, args};
 use std::fs::File;
 use std::io::BufReader;
 use std::process::exit;
@@ -13,7 +13,7 @@ use crate::geometry::{MeshLoadError};
 use crate::scene::{LoadTomlError, Scene};
 
 
-const PORT: &str = "8080";
+const DEFAULT_PORT: &str = "8080";
 const SCENE_NAMES: [&str; 3] = ["cornell_box", "cubes", "flying_unicorn"];
 
 
@@ -35,7 +35,8 @@ async fn main() {
     }));
 
     let server = Server::new(scenes);
-    server.listen(PORT).await;
+    let port = env::var("PORT").unwrap_or_else(|_| DEFAULT_PORT.to_string());
+    server.listen(port.as_str()).await;
 }
 
 fn load_scene(path: &String) -> Scene {
